@@ -41,18 +41,18 @@ fun resolveUri(uri: URI, method: UriMethod, headers: Map<String,String>, body: A
             "file" -> getFile(File(url.path))
             "data" -> decodeData(url.toString())
             "jdbc" -> try { Database(url.toString()) } catch (e: Exception) {e}
-            "sftp" -> RuntimeException("Uri scheme not implemented yet for GET: ${url.scheme}")
-            // TODO: mailto and sip could do contact search, check mailbox, voicemail, messages, log history, ...
             else -> {
                 val ns = getNamespace(url.scheme)
-                if (ns != null) ns.value(url.toString()) else RuntimeException("Unsupported uri scheme for GET: ${url.scheme}")
+                if (ns != null)
+                    ns.value(url.toString())
+                else
+                    RuntimeException("Unsupported uri scheme for GET: ${url.scheme}")
             }
         }
 
         UriMethod.POST -> when (url.scheme) {
             "file" -> postFile(File(url.path), body, headers)
             "data" -> encodeData(url.toString(), body)
-            "sftp", "mailto", "sip" -> throw RuntimeException("Uri scheme not implemented yet for POST: ${url.scheme}")
             else -> getNamespace(url.scheme)?.setValue(url.toString(), body)
                 ?: RuntimeException("Unsupported uri scheme for POST: ${url.scheme}")
         }
@@ -60,14 +60,12 @@ fun resolveUri(uri: URI, method: UriMethod, headers: Map<String,String>, body: A
         UriMethod.PUT -> when (url.scheme) {
             "file" -> putFile(File(url.path), body, headers)
             "data" -> encodeData(url.toString(), body)
-            "sftp", "mailto", "sip" -> throw RuntimeException("Uri scheme not implemented yet for PUT: ${url.scheme}")
             else -> getNamespace(url.scheme)?.setValue(url.toString(), body)
                 ?: RuntimeException("Unsupported uri scheme for PUT: ${url.scheme}")
         }
 
         UriMethod.DELETE -> when (url.scheme) {
             "file" -> deleteFile(File(url.path))
-            "sftp" -> RuntimeException("Uri scheme not implemented yet for DELETE: ${url.scheme}")
             else -> getNamespace(url.scheme)?.setValue(url.toString(), null)
                 ?: RuntimeException("Unsupported uri scheme for DELETE: ${url.scheme}")
         }

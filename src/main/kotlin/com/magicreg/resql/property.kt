@@ -52,11 +52,10 @@ class GenericProperty(
     }
 }
 
-private val GENERIC_PROPERTIES = "type,class,size,keys".split(",")
+private val GENERIC_PROPERTIES = "class,size,keys".split(",")
 
 private fun genericPropertyValue(key: String, instance: Any?): Any? {
     return when (key) {
-        "type" -> instance.dataType()
         "class" -> if (instance == null) Void::class else instance::class
         "size" -> {
             if (instance == null)
@@ -75,18 +74,18 @@ private fun genericPropertyValue(key: String, instance: Any?): Any? {
                 instance.size
             else if (instance is Namespace)
                 instance.names.size
-            else if (instance.dataType() == DataType.ENTITY)
-                BeanMap(instance).size
-            else
-                1
+            else {
+                val map = BeanMap(instance)
+                if (map.isEmpty()) 1 else map.size
+            }
         }
         "keys" -> {
             if (instance is Map<*,*>)
-                instance.keys.toList()
-            else if (instance.dataType() == DataType.ENTITY)
-                BeanMap(instance).keys.toList()
+                instance.keys.map{it.toString()}
+            else if (instance is Namespace)
+                instance.names
             else
-                emptyList()
+                BeanMap(instance).keys.map{it.toString()}
         }
         else -> null
     }

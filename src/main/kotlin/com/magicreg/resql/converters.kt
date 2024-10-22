@@ -477,17 +477,6 @@ fun toClass(value: Any?): KClass<*> {
         if (c != null)
             return c
     }
-    if (value is DataType) {
-        return when (value) {
-            DataType.ANY -> Any::class
-            DataType.NUMBER -> Number::class
-            DataType.FUNCTION -> Function::class
-            DataType.ENTITY -> Map::class
-            DataType.COLLECTION -> Collection::class
-            DataType.TEXT -> String::class
-            DataType.VIEW -> URI::class
-        }
-    }
     if (value == null)
         return Void::class
     return value::class

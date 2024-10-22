@@ -1,8 +1,13 @@
 package com.magicreg.resql
 
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.net.URI
+import java.nio.charset.Charset
 import java.sql.*
 import kotlin.reflect.KClass
+
+private enum class ResultMode { ANY, SINGLE, MULTIPLE }
 
 class Database(
     private val originalUrl: String,
@@ -10,12 +15,11 @@ class Database(
     override val readOnly: Boolean = false
 ): Namespace {
     override val uri = extractSecureUrl()
-    val catalog = URI(uri).path.split("/")[1]
+    private val catalog = URI(uri).path.split("/")[1]
     private val connection = DriverManager.getConnection(originalUrl)
 
     override val names: List<String> get() {
-        val meta = connection.metaData
-        val rs = meta.getTables(catalog, null, null, arrayOf("TABLE"))
+        val rs = connection.metaData.getTables(catalog, null, null, arrayOf("TABLE"))
         val tables = mutableListOf<String>()
         while (rs.next())
             tables.add(rs.getString("TABLE_NAME").lowercase())
@@ -43,23 +47,34 @@ class Database(
 
     override fun apply(method: UriMethod, path: List<String>, query: Query, value: Any?): Response {
         return when(val state = method.name.lowercase()+path.size) {
-            "get0" -> if (query.filter.isEmpty) Response(names) else selectRows(query)
-            "get1" -> selectRows(query.addQueryPart(".source", path[0]))
-            "get2" -> {
-                val response = selectRows(query.addQueryPart(".source", path[0]).addQueryPart(getPrimaryKeys(path[0])[0], path[1]))
-                if (response.data !is Collection<*>)
-                    response
-                else if (response.data.isEmpty())
+            "get0" -> if (query.filter.isEmpty) Response(names) else selectRows(query, value?.toString())
+            "get1" -> {
+                if (getTable(path[0]) == null)
                     Response(StatusCode.NotFound)
                 else
-                    Response(response.data.iterator().next())
+                    selectRows(query.addQueryPart(".source", path[0]), value?.toString(), ResultMode.MULTIPLE)
+            }
+            "get2" -> {
+                val pkeys = getPrimaryKeys(path[0])
+                when (pkeys.size) {
+                    0 -> return Response(StatusCode.NotFound)
+                    1 -> query.addQueryPart(pkeys[0], path[1])
+                    else -> {
+                        val ids = path[1].split(",")
+                        if (ids.size != pkeys.size)
+                            return Response(StatusCode.BadRequest)
+                        for ((index, value) in pkeys.withIndex())
+                            query.addQueryPart(pkeys[index], ids[index])
+                    }
+                }
+                selectRows(query.addQueryPart(".source", path[0]), value?.toString(), ResultMode.SINGLE)
             }
             "post0" -> selectRows(query.addQueryPart(".query", value))
             "post1" -> insertRows(path[0], formatRows(value))
-            "post2" -> updateRows(path[0], mergeRows(formatRows(value)), query.filter)
+            "post2" -> updateRows(path[0], mergeRows(formatRows(value)), query.filter) // TODO: check for id conflict
             "put0" -> selectRows(query.addQueryPart(".query", value))
             "put1" -> Response(if (createTable(path[0], mergeRows(formatRows(value)))) StatusCode.OK else StatusCode.BadRequest)
-            "put2" -> updateRows(path[0], mergeRows(formatRows(value)), query.addQueryPart(getPrimaryKeys(path[0])[0], path[1]).filter)
+            "put2" -> updateRows(path[0], mergeRows(formatRows(value)), query.addQueryPart(getPrimaryKeys(path[0])[0], path[1]).filter) // TODO: merge with existing row with same id
             "delete0" -> deleteRows(query)
             "delete1" -> deleteRows(query.addQueryPart(".source", path[0]))
             "delete2" -> deleteRows(query.addQueryPart(".source", path[0]).addQueryPart(getPrimaryKeys(path[0])[0], path[1]))
@@ -74,9 +89,8 @@ class Database(
     fun getTable(table: String): Map<String,KClass<*>>? {
         if (names.indexOf(table) < 0)
             return null
-        val meta = connection.metaData
         val columns = mutableMapOf<String,KClass<*>>()
-        val rs = meta.getColumns(catalog,null,table.uppercase(),null)
+        val rs = connection.metaData.getColumns(catalog,null, table,null)
         while (rs.next()) {
             val name = rs.getString("COLUMN_NAME").lowercase()
             columns[name] = getResqlType(rs.getObject("DATA_TYPE"))
@@ -97,9 +111,18 @@ class Database(
 
     fun getPrimaryKeys(table: String): List<String> {
         val pkeys = mutableListOf<String>()
-        val rs = connection.metaData.getPrimaryKeys(catalog, null, table.uppercase())
+        val rs = connection.metaData.getPrimaryKeys(catalog, null, table)
         while (rs.next())
             pkeys.add(rs.getString("COLUMN_NAME").lowercase())
+        if (pkeys.isEmpty()) {
+            val columns = getTable(table)!!
+            if (columns["id"] != null)
+                pkeys.add("id")
+            else if (columns["code"] != null)
+                pkeys.add("code")
+            else if (columns.isNotEmpty())
+                pkeys.iterator().next()
+        }
         return pkeys
     }
 
@@ -127,16 +150,22 @@ class Database(
         return result
     }
 
-    private fun selectRows(query: Query): Response {
+    private fun selectRows(query: Query, format: String? = null, mode: ResultMode = ResultMode.ANY): Response {
         val res = validateQuerySource(query.source)
         if (res.status != StatusCode.OK)
             return res
-        val table = res.type
+        val table = res.type!!
         val clauses = buildSqlClauses(query.filter)
         val keys = if (query.keys.isEmpty()) "*" else query.keys.joinToString(", ")
         val limit = if (query.page.size <= 0) "" else " limit ${query.page.size} offset ${query.page.range.first}"
         // TODO: missing group->group_by and sort->order_by
-        return Response(query("select $keys from $table$clauses$limit"))
+        val result = query("select $keys from $table$clauses$limit")
+        if (mode == ResultMode.MULTIPLE) return createResponse(table, result, format)
+        return when (result.size) {
+            0 -> Response(StatusCode.NotFound)
+            1 -> Response(result[0])
+            else -> if (mode == ResultMode.SINGLE) Response(result) else createResponse(table, result, format)
+        }
     }
 
     private fun insertRows(table: String, rows: List<Map<String,Any?>>): Response {
@@ -156,6 +185,7 @@ class Database(
             count += update(sql)
         }
         return Response(if (count > 0) StatusCode.OK else StatusCode.NotFound)
+        // TODO: replace OK with links to inserted rows
     }
 
     private fun updateRows(table: String, data: Map<String,Any?>, filter: Filter): Response {
@@ -172,9 +202,11 @@ class Database(
                 values.add(key+" = "+printSqlValue(data[key], type))
         }
         val clauses = if (query.isEmpty()) getUpdateClause(data, pkeys) else query
+        // TODO: check if we need to create a new record or merge with an existing one
         val sql = "update "+table+" set "+values.joinToString(", ")+clauses
         count += update(sql)
         return Response(if (count > 0) StatusCode.OK else StatusCode.NotFound)
+        // TODO: replace OK with links to updated rows
     }
 
     private fun deleteRows(query: Query): Response {
@@ -185,6 +217,28 @@ class Database(
         val clauses = buildSqlClauses(query.filter)
         val count = update("delete from $table$clauses")
         return Response(if (count > 0) StatusCode.NoContent else StatusCode.NotFound)
+    }
+
+    private fun createResponse(table: String, rows: List<Map<String,Any?>>, format: String?): Response {
+        return if (format == "text/html") {
+            val links = mutableListOf<String>()
+            val pkeys = getPrimaryKeys(table)
+            for (row in rows) {
+                val ids = mutableListOf<String>()
+                for (pkey in pkeys)
+                    ids.add(row[pkey].toString())
+                val uri = "/$prefix/$table/${ids.joinToString(",")}"
+                links.add("<a href='$uri'>${row.label()}</a>")
+            }
+            return Response(ByteArrayInputStream(links.joinToString("<br>\n").toByteArray(Charset.forName(defaultCharset()))), format)
+        }
+        else if (format != null) {
+            val output = ByteArrayOutputStream()
+            getFormat(format)!!.encode(rows, output, defaultCharset())
+            Response(ByteArrayInputStream(output.toByteArray()), format)
+        }
+        else
+            Response(rows)
     }
 
     private fun validateQuerySource(source: Collection<String>): Response {

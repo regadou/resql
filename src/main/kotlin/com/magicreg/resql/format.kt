@@ -11,8 +11,6 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import org.apache.commons.csv.CSVFormat
 import java.io.*
 import java.lang.reflect.Member
-import java.net.URLDecoder
-import java.net.URLEncoder
 import java.nio.charset.Charset
 import java.text.SimpleDateFormat
 import java.util.*
@@ -314,8 +312,8 @@ private fun encodeForm(value: Any?, output: OutputStream, charset: String) {
     val entries = mutableListOf<String>()
     val map = toMap(value)
     for (key in map.keys) {
-        entries.add(urlencode(key?.toString() ?: "null")+"="+
-                urlencode(map[key]?.toString() ?: "null"))
+        entries.add((key?.toString()?.urlEncode() ?: "null")+"="+
+                    (map[key]?.toString()?.urlEncode() ?: "null"))
     }
     encodeString(entries.joinToString("&"), output, charset)
 }
@@ -325,8 +323,31 @@ private fun decodeHtml(input: InputStream, charset: String): Any? {
 }
 
 private fun encodeHtml(value: Any?, output: OutputStream, charset: String) {
-    if (value != null)
-        output.write(toString(value).toByteArray(Charset.forName(charset)))
+    output.write(encodeHtmlPart(value).toByteArray(Charset.forName(charset)))
+}
+
+private fun encodeHtmlPart(value: Any?): String {
+    return if (value == null)
+        "&nbsp;"
+    else if (value.isMappable()) {
+        val map = value.toMap() ?: toMap(value)
+        val lines = mutableListOf<String>()
+        for (key in map.keys) {
+            val k = encodeHtmlPart(key)
+            val v = encodeHtmlPart(map[key])
+            lines.add("<tr><td>$k</td><td>$v</td></tr>")
+        }
+        "<table border=1 cellpadding=1 cellspacing=2>\n"+lines.joinToString("\n")+"\n<table>\n"
+    }
+    else if (value.isIterable()) {
+        val it = value.toIterator() ?: listOf(value).iterator()
+        val lines = mutableListOf<String>()
+        while (it.hasNext())
+            lines.add(encodeHtmlPart(it.next()))
+        lines.joinToString("<br>\n")
+    }
+    else
+        value.toText() // TODO: html encode
 }
 
 private fun configureCsvFormat(): CSVFormat {
@@ -344,7 +365,7 @@ private fun <T> addSerializer(module: SimpleModule, klass: Class<T>) {
 
 private fun parseValue(src: Any?): Any? {
     if (src is CharSequence) {
-        return when (val value = URLDecoder.decode(src.toString(), defaultCharset()).trim()) {
+        return when (val value = src.toString().urlDecode().trim()) {
             "null" -> null
             "true" -> true
             "false" -> false
@@ -369,7 +390,7 @@ private fun getExpression(value: String): Any? {
 }
 
 private fun setValue(map: MutableMap<String,Any?>, name: String, value: Any?) {
-    val key = URLDecoder.decode(name, defaultCharset())
+    val key = name.urlDecode()
     val old = map[key]
     if (old == null)
         map[key] = parseValue(value)
@@ -377,10 +398,6 @@ private fun setValue(map: MutableMap<String,Any?>, name: String, value: Any?) {
         (old as MutableCollection<Any?>).add(parseValue(value))
     else
         map[key] = mutableListOf<Any?>(old, parseValue(value))
-}
-
-private fun urlencode(txt: String): String {
-    return URLEncoder.encode(txt, defaultCharset()).replace("+", "%20")
 }
 
 private fun detectSeparator(input: InputStream): Char {

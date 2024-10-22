@@ -23,65 +23,98 @@ fun startServer(config: Configuration) {
     val topContext = getContext()
     embeddedServer(Netty, host = config.host, port = config.port) {
         install(Sessions) {cookie<WebSession>("WEB_SESSION", storage = SessionStorageMemory())}
-        routing {
-            route("/{path...}") {
-                handle {
-                    val cx = getSessionContext(call, topContext)
-                    try { requestProcessing(config, call) }
-                    finally { cx.close(false) }
-                }
-            }
-        }
+        routing { route("/{path...}") {handle{requestProcessing(topContext, config, call)}}}
         println("Server listening at http://${config.host}:${config.port}/ ...")
     }.start(true)
 }
 
+private const val DEBUG = true
 private val METHODS_WITH_BODY = arrayOf(UriMethod.POST, UriMethod.PUT)
 private val DEFAULT_FORMAT = getFormat("application/json")!!
-private data class WebSession(val id: String)
+private val HTTP_STATUS_CACHE = mutableMapOf<StatusCode,HttpStatusCode>()
 
-private suspend fun requestProcessing(config: Configuration, call: ApplicationCall) {
-    val method = UriMethod.valueOf(call.request.httpMethod.value.uppercase())
-    val path = call.request.path()
-    val query = Query(getMap(call.request.queryParameters, false))
+private suspend fun requestProcessing(topContext: Context, config: Configuration, call: ApplicationCall) {
     val headers = getMap(call.request.headers, true)
-    val inputStream = if (METHODS_WITH_BODY.contains(method)) call.receiveStream() else null
-    logRequest(method, path, call.request.origin.remoteAddress, headers["content-length"])
-    val parts = path.split("/").filter{it.isNotBlank()}
-    if (parts.isNotEmpty()) {
-        val prefix = parts[0]
-        val ns = config.routes[prefix] ?: return call.respondText("$path not found\n", ContentType.Text.Plain, HttpStatusCode(StatusCode.NotFound.code, StatusCode.NotFound.message))
-        if (ns.readOnly && method != UriMethod.GET)
-            return call.respondText("$method not allowed on $path\n", ContentType.Text.Plain, HttpStatusCode(StatusCode.MethodNotAllowed.code, StatusCode.MethodNotAllowed.message))
-        if (method == UriMethod.GET && query.page.size > config.maxPageSize)
-            query.addQueryPart(".page", mapOf("size" to config.maxPageSize))
-        val response = ns.apply(method, parts.subList(1, parts.size), query, requestBody(headers, inputStream))
-        val httpStatus = HttpStatusCode(response.status.code, response.status.message)
-        if (response.data is InputStream) {
-            val typeParts = (response.type ?: responseFormat(headers).mimetype).split("/")
-            call.respondOutputStream(ContentType(typeParts[0], typeParts[1]), httpStatus) { copyStream(response.data,this, true) }
+    val cx = getSessionContext(call, topContext, headers)
+    try {
+        val method = UriMethod.valueOf(call.request.httpMethod.value.uppercase())
+        val path = call.request.path()
+        val query = Query(getMap(call.request.queryParameters, false))
+        val inputStream = if (METHODS_WITH_BODY.contains(method)) call.receiveStream() else null
+        logRequest(method, path, call.request.origin.remoteAddress, headers["content-length"])
+        var parts = path.split("/").filter { it.isNotBlank() }
+        if (parts.isNotEmpty()) {
+            val prefix = parts[0]
+            val ns = config.routes[prefix] ?: return call.respondText(
+                "$path not found\n",
+                ContentType.Text.Plain,
+                httpStatus(StatusCode.NotFound)
+            )
+            if (ns.readOnly && method != UriMethod.GET)
+                return call.respondText(
+                    "$method not allowed on $path\n",
+                    ContentType.Text.Plain,
+                    httpStatus(StatusCode.MethodNotAllowed)
+                )
+            if (!ns.keepUrlEncoding)
+                parts = parts.map { it.urlDecode() }
+            if (method == UriMethod.GET && query.page.size > config.maxPageSize)
+                query.addQueryPart(".page", mapOf("size" to config.maxPageSize))
+            val response = ns.apply(method, parts.subList(1, parts.size), query, requestBody(headers, inputStream))
+            val httpStatus = httpStatus(response.status)
+            if (response.status.code >= 400) {
+                val typeParts = (response.type ?: responseFormat(headers).mimetype).split("/")
+                call.respondText(
+                    "$path ${response.data ?: response.status.message}\n",
+                    ContentType.Text.Plain,
+                    httpStatus
+                )
+            }
+            else if (response.data is InputStream) {
+                val typeParts = (response.type ?: responseFormat(headers).mimetype).split("/")
+                call.respondOutputStream(
+                    ContentType(typeParts[0], typeParts[1]),
+                    httpStatus
+                ) { copyStream(response.data, this, true) }
+            }
+            else
+                sendValue("/$prefix/", "", response, headers, call)
         }
-        else if (response.status.code >= 400) {
-            val typeParts = (response.type ?: responseFormat(headers).mimetype).split("/")
-            call.respondText("$path ${response.data ?: response.status.message}\n", ContentType.Text.Plain, httpStatus)
-        }
+        else if (method == UriMethod.GET)
+            sendValue("/", "/", Response(config.routes.keys), headers, call)
         else
-            sendValue("$prefix/", "", response, headers, call)
+            call.respondText(
+                "$method not allowed on $path\n",
+                ContentType.Text.Plain,
+                httpStatus(StatusCode.MethodNotAllowed)
+            )
     }
-    else if (method == UriMethod.GET)
-        sendValue("", "/", Response(config.routes.keys), headers, call)
-    else
-        call.respondText("$method not allowed on $path\n", ContentType.Text.Plain, HttpStatusCode(StatusCode.MethodNotAllowed.code, StatusCode.MethodNotAllowed.message))
+    catch (e: Exception) {
+        val stacktrace = getStacktrace(e)
+        System.err.println(stacktrace)
+        val msg = if (!DEBUG) e.toString() else "<html><body><h2 style='text-align:center'>System error</h2><pre>\n$stacktrace\n</pre></body></html>"
+        call.respondText(msg+"\n", ContentType.Text.Html, httpStatus(StatusCode.InternalServerError))
+    }
+    cx.close(false)
 }
 
 private suspend fun sendValue(prefix: String, suffix: String, response: Response, headers: Map<String,Any?>, call: ApplicationCall) {
     val format = getFormat(response.type ?: "") ?: responseFormat(headers)
     var typeParts = format.mimetype.split("/")
     val data = if (typeParts[1] == "html" && response.data is Collection<*>)
-        response.data.joinToString("<br>\n") { "<a href='$prefix$it$suffix'>$it</a>" }
+        response.data.sortedBy{it.toString().lowercase()}.joinToString("<br>\n") { printHtmlLink(it, prefix, suffix, headers) }
     else
         format.encodeText(response.data, response.charset)
-    call.respondText(data, ContentType(typeParts[0], typeParts[1]), HttpStatusCode(response.status.code, response.status.message))
+    call.respondText(data, ContentType(typeParts[0], typeParts[1]), httpStatus(response.status))
+}
+
+private fun httpStatus(code: StatusCode): HttpStatusCode {
+    var status = HTTP_STATUS_CACHE[code]
+    if (status == null) {
+        status = HttpStatusCode(code.code, code.message)
+        HTTP_STATUS_CACHE[code] = status
+    }
+    return status
 }
 
 private fun responseFormat(headers: Map<String,Any?>): Format {
@@ -100,8 +133,10 @@ private fun responseFormat(headers: Map<String,Any?>): Format {
 }
 
 private suspend fun requestBody(headers: Map<String,Any?>, inputStream: InputStream?): Any? {
-    if (inputStream == null)
-        return null
+    if (inputStream == null) {
+        val formats = extractHeader(headers, "accept")
+        return if (formats.isEmpty()) null else formats[0]
+    }
     val parts = (headers["content-type"]?.toString() ?: "text/plain").split(";")
     val mimetype = parts[0].trim()
     val charset = parts.firstOrNull { it.contains("charset=")}?.split("=")?.get(1)?.trim() ?: defaultCharset()
@@ -123,7 +158,7 @@ private fun logRequest(method: UriMethod, uri: String, remote: String, size: Any
     println(printTime(System.currentTimeMillis())+" "+remote+" "+method+" "+uri+bytes)
 }
 
-private fun getSessionContext(call: ApplicationCall, parent: Context): Context {
+private fun getSessionContext(call: ApplicationCall, parent: Context, headers: Map<String,Any?>): Context {
     val session : WebSession? = call.sessions.get<WebSession>()
     var local = call.request.local
     val baseuri = URI("${local.scheme}://${local.serverHost}:${local.serverPort}")
@@ -131,6 +166,7 @@ private fun getSessionContext(call: ApplicationCall, parent: Context): Context {
     if (session == null)
         call.sessions.set(WebSession(cx.name))
     cx.requestUri = local.uri.split("?")[0]
+    cx.setValue("languages", extractHeader(headers, "accept-language"))
     return cx
 }
 
@@ -149,10 +185,34 @@ private fun printTime(millis: Long): String {
     return t.toString().split(".")[0].split("T").joinToString(" ")
 }
 
+private fun printHtmlLink(data: Any?, prefix: String = "", suffix: String = "", headers: Map<String,Any?> = emptyMap()): String {
+    var link = ""
+    var name = ""
+    if (data.isText() || data is Number || data is Boolean) {
+        val parts = data.toText().split("/").filter { it.isNotBlank() }
+        name = if (parts.isEmpty()) "" else parts[parts.size-1]
+        link = parts.map { it.urlEncode() }.joinToString("/")
+    }
+    else {
+        val map = data.toMap() ?: mapOf("value" to data)
+        name = map.label()
+        link = (map["id"]?.toString() ?: name).urlEncode()
+    }
+    return "<a href='$prefix$link$suffix'>$name</a>"
+}
+
 private suspend fun copyStream(input: InputStream, output: OutputStream, closeInput: Boolean) {
     withContext(Dispatchers.IO) {
         input.copyTo(output)
         if (closeInput)
             input.close()
     }
+}
+
+private fun extractHeader(headers: Map<String,Any?>, name: String): List<String> {
+    val value = headers[name]?.toString() ?: return emptyList()
+    return value.replace(";", ",")
+                .split(",")
+                .filter {it.indexOf("q=")<0 && it.indexOf("*/*")<0}
+                .map {it.split("-")[0]}
 }

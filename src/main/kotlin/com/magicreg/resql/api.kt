@@ -2,9 +2,9 @@ package com.magicreg.resql
 
 import org.apache.commons.beanutils.BeanMap
 import java.io.*
-import java.lang.reflect.Executable
 import java.net.URI
 import java.net.URL
+import java.net.URLDecoder
 import java.net.URLEncoder
 import java.nio.charset.Charset
 import java.text.Normalizer
@@ -16,35 +16,8 @@ import java.time.format.DateTimeFormatter
 import java.time.temporal.Temporal
 import java.util.*
 import kotlin.reflect.KClass
-import kotlin.reflect.KFunction
 
-enum class DataType { ANY, NUMBER, FUNCTION, ENTITY, COLLECTION, TEXT, VIEW }
 enum class UriMethod { GET, POST, PUT, DELETE }
-data class Response(val data: Any?, val type: String? = null, val charset: String = defaultCharset(), val status: StatusCode = StatusCode.OK) {
-    constructor(statusCode: StatusCode): this(statusCode.message, null, defaultCharset(), statusCode)
-}
-
-enum class StatusCode(val code: Int) {
-    OK(200),
-    Created(201),
-    Accepted(202),
-    NoContent(204),
-    MovedPermanently(301),
-    Found(302),
-    BadRequest(400),
-    Unauthorized(401),
-    Forbidden(403),
-    NotFound(404),
-    MethodNotAllowed(405),
-    Conflict(409),
-    InternalServerError(500),
-    NotImplemented(501),
-    BadGateway(502),
-    ServiceUnavailable(503),
-    GatewayTimeout(504);
-
-    val message: String = LetterCase.LOWER.format(this.name.uncamel(" "))
-}
 
 enum class CompareOperator(override val symbol: String, override val function: (List<Any?>) -> Any?): Function {
     LESS("<", ::less_func), NOT_LESS(">=", ::not_less_func),
@@ -91,7 +64,7 @@ data class Expression(
     val function: Function? = null,
     val parameters: List<Any?> = emptyList()
 ) {
-    fun value(): Any? {
+    fun execute(): Any? {
         return if (function == null)
             parameters.simplify(true)
         else if (parameters.isEmpty())
@@ -159,6 +132,7 @@ interface Namespace {
     val prefix: String
     val uri: String
     val readOnly: Boolean
+    val keepUrlEncoding: Boolean get() = false
     val isEmpty: Boolean get() { return names.isEmpty() }
     val names: List<String>
     fun hasName(name: String): Boolean
@@ -192,6 +166,34 @@ interface Property {
     fun setValue(value: Any?): Boolean
 }
 
+data class Response(val data: Any?, val type: String? = null, val charset: String = defaultCharset(), val status: StatusCode = StatusCode.OK) {
+    constructor(statusCode: StatusCode): this(statusCode.message, null, defaultCharset(), statusCode)
+}
+
+enum class StatusCode(val code: Int) {
+    OK(200),
+    Created(201),
+    Accepted(202),
+    NoContent(204),
+    MovedPermanently(301),
+    Found(302),
+    BadRequest(400),
+    Unauthorized(401),
+    Forbidden(403),
+    NotFound(404),
+    MethodNotAllowed(405),
+    Conflict(409),
+    InternalServerError(500),
+    NotImplemented(501),
+    BadGateway(502),
+    ServiceUnavailable(503),
+    GatewayTimeout(504);
+
+    val message: String = LetterCase.LOWER.format(this.name.uncamel(" "))
+}
+
+data class WebSession(val id: String)
+
 fun defaultCharset(charset: String? = null): String {
     if (charset != null)
         defaultCharset = charset
@@ -208,39 +210,9 @@ fun <T: Any> convert(value: Any?, type: KClass<T>): T {
     throw RuntimeException("Cannot convert ${srcClass.qualifiedName} to ${type.qualifiedName}")
 }
 
-fun Any?.dataType(): DataType {
-    return if (this == null)
-        DataType.ANY
-    else if (this is File || this is URI || this is URL) {
-        val uri = this.toUri()
-        if (uri == null)
-            DataType.TEXT
-        else if (uri.scheme == "geo")
-            DataType.ENTITY
-        else {
-            val type = uri.contentType()
-            if (type != null && VIEW_TYPES.contains(type.split("/")[0])) DataType.VIEW else DataType.TEXT
-        }
-    }
-    else if (this.isText())
-        DataType.TEXT
-    else if (this is Number || this is Boolean)
-        DataType.NUMBER
-    else if (this is Function || this is UriMethod || this is KFunction<*> || this is Executable)
-        DataType.FUNCTION
-    else if (this.isMappable() || this is Temporal || this is java.util.Date)
-        DataType.ENTITY
-    else if (this.isIterable())
-        DataType.COLLECTION
-    else {
-        val bean = BeanMap(this)
-        return if (bean.size > 0) DataType.ENTITY else DataType.ANY
-    }
-}
-
 fun Any?.resolve(deepResolving: Boolean = false): Any? {
     if (this is Expression)
-        return this.value().resolve(deepResolving)
+        return this.execute().resolve(deepResolving)
     if (this is Map.Entry<*,*>)
         return this.value.resolve(deepResolving)
     if (this is Property)
@@ -659,7 +631,7 @@ fun String.detectFormat(createDataUri: Boolean = false): String? {
     else if (!createDataUri)
         type
     else {
-        try { "data:$type,${URLEncoder.encode(txt, defaultCharset())}" }
+        try { "data:$type,${txt.urlEncode()}" }
         catch (e: Exception) { null }
     }
 }
@@ -696,6 +668,14 @@ fun String.uncamel(separator: String): String {
     if (word.isNotEmpty())
         words.add(word)
     return words.joinToString(separator)
+}
+
+fun String.urlEncode(charset: String = defaultCharset()): String {
+    return URLEncoder.encode(this, charset).replace("+", "%20")
+}
+
+fun String.urlDecode(charset: String = defaultCharset()): String {
+    return URLDecoder.decode(this, charset)
 }
 
 fun String.toTemporal(): Temporal? {
@@ -774,10 +754,40 @@ fun Temporal.toTime(): LocalTime {
     throw RuntimeException("Temporal format not supported: ${this::class.simpleName}")
 }
 
+fun Map<out Any?,Any?>.label(): String {
+    val map = this
+    return when (map.size) {
+        0 -> map::class.toString()
+        1 -> map.iterator().next().value.toString()
+        2 -> map[map.keys.filter { it != "id" }[0]].toString()
+        else -> {
+            val cx = getContext()
+            var name = ""
+            val lists = listOf(LABEL_KEYS, cx.value("languages").toCollection(), VALUE_KEYS)
+            for (list in lists) {
+                for (key in list) {
+                    val value = map[key]
+                    if (value != null) {
+                        name = value.toString()
+                        break
+                    }
+                }
+                if (name.isNotBlank())
+                    break
+            }
+            if (name.isBlank())
+                name = map.toText()
+            name
+        }
+    }
+}
+
 private val NORMALIZED_FORM = Normalizer.Form.NFD
 private val DATE_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd")
 private val HOUR_FORMAT = DateTimeFormatter.ofPattern("HH:mm")
 private val TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm:ss")
 private val TIMESTAMP_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss")
 private val VIEW_TYPES = "imane,audio,video,model".split(",")
+private val LABEL_KEYS = "name,label,symbol".split(",")
+private val VALUE_KEYS = "value,id,type".split(",")
 private var defaultCharset = "utf8"

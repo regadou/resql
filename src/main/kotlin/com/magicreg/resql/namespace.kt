@@ -65,6 +65,7 @@ class HttpNamespace(
     override val prefix: String = "",
     override val readOnly: Boolean = false
 ): Namespace {
+    override val keepUrlEncoding = true
     override val isEmpty: Boolean get() { return false }
     override val names: List<String> = emptyList()
 
@@ -100,7 +101,7 @@ class FolderNamespace(
     private val folder: File,
     override val prefix: String = ""
 ): Namespace {
-    override val uri: String = folder.toURI().toString()
+    override val uri: String = if (folder.isDirectory) folder.toURI().toString() else throw RuntimeException("$folder is not a directory")
     override val readOnly: Boolean = !folder.canWrite()
     override val names: List<String> get() { return folder.list().toList() }
 
@@ -129,10 +130,11 @@ class FolderNamespace(
     }
 
     override fun apply(method: UriMethod, path: List<String>, query: Query, value: Any?): Response {
-        val sep = if (uri.endsWith("/")) "" else "/"
-        val file = File("$uri$sep${path.joinToString("/")}")
-        return if (file.isDirectory)
-            Response(file.list())
+        val file = File("$folder/${path.joinToString("/")}")
+        return if (file.isDirectory) {
+            val offset = folder.toString().length+1
+            Response(file.list().map { "$file/$it".substring(offset) })
+        }
         else if (file.exists()) {
             when (method) { // TODO: take query into account
                 UriMethod.GET -> Response(FileInputStream(file), file.toURI().contentType())
