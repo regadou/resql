@@ -1,5 +1,9 @@
 package com.magicreg.resql
 
+fun getFunction(name: String): Function? {
+    return FUNCTIONS[name.lowercase()]
+}
+
 class FunctionWrapper(
     override val id: String,
     override val symbol: String,
@@ -96,6 +100,38 @@ fun modulo_func(args: List<Any?>): Any? { return null }
 fun exponent_func(args: List<Any?>): Any? { return null }
 fun root_func(args: List<Any?>): Any? { return null }
 fun logarithm_func(args: List<Any?>): Any? { return null }
+
+fun execute_func(args: List<Any?>): Any? {
+    var value: Any? = null
+    for (arg in args)
+        value = toExpression(arg).execute()
+    return value
+}
+
+fun property_func(args: List<Any?>): Any? {
+    var value = args[0]
+    for (arg in args.subList(1,args.size))
+        value = value.property(arg.toText())
+    return value
+}
+
+fun all_func(args: List<Any?>): Any? {
+    val cx = getContext()
+    return when (args.size) {
+        0 -> (cx.configuration().routes.keys.map { "$it:" } + cx.names + FUNCTIONS.keys.map{"$it()"}).sorted()
+        1 -> args[0].resolve().property("keys")
+        else -> Filter().addConditions(args.subList(1, args.size)).filter(args[0].resolve())
+    }
+}
+
+private val FUNCTIONS = initFunctions()
+
+private fun initFunctions(): Map<String, Function> {
+    val map = mutableMapOf<String, Function>()
+    for (entries in arrayOf(Type.entries, UriMethod.entries, CompareOperator.entries, LogicOperator.entries, MathOperator.entries, MiscOperator.entries))
+        entries.forEach { map[it.id] = it }
+    return map
+}
 
 private fun minimumResolvedArgs(args: List<Any?>): List<Any?> {
     return  when (args.size) {

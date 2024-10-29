@@ -44,7 +44,7 @@ fun resolveUri(uri: URI, method: UriMethod, headers: Map<String,String>, body: A
             else -> {
                 val ns = getNamespace(url.scheme)
                 if (ns != null)
-                    ns.value(url.toString())
+                    ns.value(trimUriScheme(url))
                 else
                     RuntimeException("Unsupported uri scheme for GET: ${url.scheme}")
             }
@@ -53,20 +53,20 @@ fun resolveUri(uri: URI, method: UriMethod, headers: Map<String,String>, body: A
         UriMethod.POST -> when (url.scheme) {
             "file" -> postFile(File(url.path), body, headers)
             "data" -> encodeData(url.toString(), body)
-            else -> getNamespace(url.scheme)?.setValue(url.toString(), body)
+            else -> getNamespace(url.scheme)?.setValue(trimUriScheme(url), body)
                 ?: RuntimeException("Unsupported uri scheme for POST: ${url.scheme}")
         }
 
         UriMethod.PUT -> when (url.scheme) {
             "file" -> putFile(File(url.path), body, headers)
             "data" -> encodeData(url.toString(), body)
-            else -> getNamespace(url.scheme)?.setValue(url.toString(), body)
+            else -> getNamespace(url.scheme)?.setValue(trimUriScheme(url), body)
                 ?: RuntimeException("Unsupported uri scheme for PUT: ${url.scheme}")
         }
 
         UriMethod.DELETE -> when (url.scheme) {
             "file" -> deleteFile(File(url.path))
-            else -> getNamespace(url.scheme)?.setValue(url.toString(), null)
+            else -> getNamespace(url.scheme)?.setValue(trimUriScheme(url), null)
                 ?: RuntimeException("Unsupported uri scheme for DELETE: ${url.scheme}")
         }
     }
@@ -205,3 +205,7 @@ private fun encode(value: Any?, type: String?, output: OutputStream, charset: St
     output.close()
 }
 
+private fun trimUriScheme(uri: URI): String {
+    val txt = uri.toString()
+    return if (uri.scheme == null) txt else txt.substring(uri.scheme.length+1)
+}

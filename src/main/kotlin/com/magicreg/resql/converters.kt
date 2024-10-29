@@ -428,11 +428,8 @@ fun toNamespace(value: Any?): Namespace {
         return getNamespace(prefix) ?: throw RuntimeException("Invalide namespace: $prefix")
     if (mapping == null && uri != null) {
         val value = URI(uri).get()
-        if (value is Database) {
-            if (prefix != null)
-                value.prefix = prefix
+        if (value is Namespace)
             return value
-        }
         if (value is MutableMap<*,*>)
             mapping = value as MutableMap<String,Any?>
         else if (value is Map<*,*>)
@@ -501,6 +498,18 @@ fun toFunction(value: Any?): Function {
         FunctionWrapper(value.toString(), "") { value }
 }
 
+fun toExpression(value: Any?): Expression {
+    if (value is Expression)
+        return value
+    if (value.isText())
+        return value.toText().toExpression()
+    if (value.isIterable())
+        return compileExpression(value.toCollection())
+    if (value == null)
+        return Expression()
+    return Expression(null, listOf(value))
+}
+
 private val FALSE_WORDS = "false,no,0,none,empty".split(",")
 private val converters = initConverters()
 
@@ -538,6 +547,7 @@ private fun initConverters(): MutableMap<KClassifier, KFunction<Any?>> {
         ::toURI,
         ::toClass,
         ::toFunction,
+        ::toExpression
     )) {
         map[function.returnType.classifier!!] = function
     }

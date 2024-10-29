@@ -7,16 +7,13 @@ import java.nio.charset.Charset
 import java.sql.*
 import kotlin.reflect.KClass
 
-private enum class ResultMode { ANY, SINGLE, MULTIPLE }
-
-class Database(
-    private val originalUrl: String,
-    override var prefix: String = "",
+class Database(originalUrl: String, originalPrefix: String? = null): Namespace {
+    override val uri = extractSecureUrl(originalUrl)
+    override var prefix = originalPrefix ?: (URI(uri).path.split("/").firstOrNull{it.isNotBlank()} ?: "")
     override val readOnly: Boolean = false
-): Namespace {
-    override val uri = extractSecureUrl()
     private val catalog = URI(uri).path.split("/")[1]
     private val connection = DriverManager.getConnection(originalUrl)
+    private enum class ResultMode { ANY, SINGLE, MULTIPLE }
 
     override val names: List<String> get() {
         val rs = connection.metaData.getTables(catalog, null, null, arrayOf("TABLE"))
@@ -252,7 +249,7 @@ class Database(
         return Response(null, table)
     }
 
-    private fun extractSecureUrl(): String {
+    private fun extractSecureUrl(originalUrl: String): String {
         if (!originalUrl.startsWith("jdbc:"))
             throw RuntimeException("Invalid database url $originalUrl")
         val trimurl = originalUrl.substring(5)

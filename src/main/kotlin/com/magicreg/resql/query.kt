@@ -68,8 +68,10 @@ class Filter(key: String? = null, compare: Any? = null, value: Any? = null): Ite
     }
 
     fun filter(container: Any?): List<Any?> {
+        if (container == null)
+            return emptyList()
         if (conditions.isEmpty())
-            return container.toCollection()
+            return if (container.isIterable()) container.toCollection() else listOf(container)
         if (container is Map<*,*>)
             return filterItems(listOf(container).iterator(), this)
         if (container.isText())
@@ -77,9 +79,7 @@ class Filter(key: String? = null, compare: Any? = null, value: Any? = null): Ite
         val iterator = container.toIterator()
         if (iterator != null)
             return filterItems(iterator, this)
-        if (container == null)
-            return emptyList()
-        if (container is Expression)
+        if (container.isReference())
             return filter(container.resolve())
         return filterItems(listOf(container).iterator(), this)
     }
@@ -110,6 +110,12 @@ class Filter(key: String? = null, compare: Any? = null, value: Any? = null): Ite
             }
         }
         conditions[conditions.size - 1][key] = mapOf(compare.symbol to value)
+        return this
+    }
+
+    fun addConditions(items: Iterable<Any?>): Filter {
+        for (item in items)
+            mapCondition(toMap(item).mapKeys { it.key.toText() })
         return this
     }
 
@@ -203,7 +209,7 @@ private fun satisfyConditions(item: Any?, conditions: Iterator<Any?>): Boolean {
         return true
     val map = toMap(item)
     while (conditions.hasNext()) {
-        if (satisfyCondition(map, toMap(conditions.next()) as Map<String, Any?>))
+        if (satisfyCondition(map, toMap(conditions.next()).mapKeys { it.key.toText() }))
             return true
     }
     return false

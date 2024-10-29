@@ -31,6 +31,7 @@ fun getContext(vararg values: Any): Context {
     var constants: Map<String,Any?>? = null
     var variables: MutableMap<String,Any?>? = null
     var uri: URI? = null
+    var config: Configuration? = null
     for (value in values) {
         if (value is Context)
             parent = value
@@ -54,6 +55,8 @@ fun getContext(vararg values: Any): Context {
             name = value
         else if (value is URI)
             uri = value
+        else if (value is Configuration)
+            config = value
     }
 
     if (constants == null && variables == null)
@@ -62,7 +65,7 @@ fun getContext(vararg values: Any): Context {
         name = randomName()
     if (uri == null)
         uri = File(System.getProperty("user.dir")).toURI()
-    val cx = Context(name!!, uri!!.toString(), parent, constants ?: emptyMap(), variables ?: mutableMapOf())
+    val cx = Context(name!!, uri!!.toString(), parent, constants ?: emptyMap(), variables ?: mutableMapOf(), config)
     CURRENT_CONTEXT.set(cx)
     return cx
 }
@@ -72,7 +75,8 @@ class Context(
     override val uri: String,
     private val parent: Context?,
     private val constants: Map<String,Any?>,
-    private val variables: MutableMap<String,Any?> = mutableMapOf()
+    private val variables: MutableMap<String,Any?> = mutableMapOf(),
+    private var config: Configuration?
 ): Namespace {
     override val prefix: String = ""
     override val readOnly: Boolean = false
@@ -82,7 +86,7 @@ class Context(
     fun childContext(childName: String?, constants: Map<String,Any?>, uri: String = this.uri): Context {
         if (CURRENT_CONTEXT.get() != this)
             throw RuntimeException("This context is not the current thread context")
-        val cx = Context(childName ?: name+"/"+randomName(), uri, this, constants)
+        val cx = Context(childName ?: name+"/"+randomName(), uri, this, constants, mutableMapOf(), null)
         CURRENT_CONTEXT.set(parent)
         return cx
     }
@@ -112,14 +116,14 @@ class Context(
         return keys.sorted()
     }
 
-    override fun value(key: String): Any? {
-        if (name.isBlank())
+    override fun value(name: String): Any? {
+        if (this.name.isBlank())
             return this
-        if (constants.containsKey(key))
-            return constants[key]
-        if (variables.containsKey(key))
-            return variables[key]
-        return parent?.value(key)
+        if (constants.containsKey(name))
+            return constants[name]
+        if (variables.containsKey(name))
+            return variables[name]
+        return parent?.value(name)
     }
 
     override fun setValue(key: String, value: Any?): Boolean {
@@ -147,6 +151,15 @@ class Context(
                 path = "/"
         }
         return path
+    }
+
+    fun configuration(): Configuration {
+        if (config != null)
+            return config!!
+        if (parent != null)
+            return parent.configuration()
+        config = Configuration()
+        return config!!
     }
 
     override fun toString(): String {

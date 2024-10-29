@@ -13,7 +13,7 @@ fun addNamespace(ns: Namespace): Boolean {
     if (NS_PREFIX_MAP.containsKey(ns.prefix) || NS_URI_MAP.containsKey(ns.uri))
         return false
     NS_PREFIX_MAP[ns.prefix] = ns
-    NS_URI_MAP[ns.toString()] = ns
+    NS_URI_MAP[ns.uri] = ns
     return true
 }
 
@@ -164,6 +164,24 @@ class FolderNamespace(
     }
 }
 
+class ContextWrapperNamespace(override val prefix: String): Namespace {
+    override val uri: String get() { return getContext().uri }
+    override val readOnly: Boolean get() { return getContext().readOnly }
+    override val names: List<String>  get() { return getContext().names }
+
+    override fun hasName(name: String): Boolean {
+        return getContext().hasName(name)
+    }
+
+    override fun value(name: String): Any? {
+        return getContext().value(name)
+    }
+
+    override fun setValue(name: String, value: Any?): Boolean {
+        return getContext().setValue(name, value)
+    }
+}
+
 // TODO: ArchiveNamespace class that can interface zip and tgz
 
 private val NS_PREFIX_MAP = mutableMapOf<String,Namespace>()
@@ -175,7 +193,7 @@ private fun queryString(query: Query): String {
         val map = it.next()
         if (map.isEmpty())
             continue
-        return "?"+ getFormat("form")!!.encodeText(map)
+        return "?"+getFormat("form")!!.encodeText(map)
     }
     return ""
 }

@@ -9,7 +9,6 @@ import io.ktor.server.engine.*
 import io.ktor.server.netty.*
 import io.ktor.server.plugins.*
 import io.ktor.server.sessions.*
-import io.ktor.util.StringValues
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.*
@@ -20,10 +19,10 @@ import java.time.ZoneOffset
 fun startServer(config: Configuration) {
     if (config.port == null || config.port < 1)
         throw RuntimeException("Invalid port number: ${config.port}")
-    val topContext = getContext()
+    val topContext = getContext(config)
     embeddedServer(Netty, host = config.host, port = config.port) {
         install(Sessions) {cookie<WebSession>("WEB_SESSION", storage = SessionStorageMemory())}
-        routing { route("/{path...}") {handle{requestProcessing(topContext, config, call)}}}
+        routing { route("/{path...}") {handle{requestProcessing(topContext, call)}}}
         println("Server listening at http://${config.host}:${config.port}/ ...")
     }.start(true)
 }
@@ -33,13 +32,14 @@ private val METHODS_WITH_BODY = arrayOf(UriMethod.POST, UriMethod.PUT)
 private val DEFAULT_FORMAT = getFormat("application/json")!!
 private val HTTP_STATUS_CACHE = mutableMapOf<StatusCode,HttpStatusCode>()
 
-private suspend fun requestProcessing(topContext: Context, config: Configuration, call: ApplicationCall) {
-    val headers = getMap(call.request.headers, true)
+private suspend fun requestProcessing(topContext: Context, call: ApplicationCall) {
+    val headers = call.request.headers.toMap()!!.mapKeys {it.key.toString().normalize()}
     val cx = getSessionContext(call, topContext, headers)
+    val config = cx.configuration()
     try {
         val method = UriMethod.valueOf(call.request.httpMethod.value.uppercase())
         val path = call.request.path()
-        val query = Query(getMap(call.request.queryParameters, false))
+        val query = Query(call.request.queryParameters.toMap()!!.mapKeys{it.toString()})
         val inputStream = if (METHODS_WITH_BODY.contains(method)) call.receiveStream() else null
         logRequest(method, path, call.request.origin.remoteAddress, headers["content-length"])
         var parts = path.split("/").filter { it.isNotBlank() }
@@ -50,12 +50,16 @@ private suspend fun requestProcessing(topContext: Context, config: Configuration
                 ContentType.Text.Plain,
                 httpStatus(StatusCode.NotFound)
             )
-            if (ns.readOnly && method != UriMethod.GET)
-                return call.respondText(
-                    "$method not allowed on $path\n",
-                    ContentType.Text.Plain,
-                    httpStatus(StatusCode.MethodNotAllowed)
-                )
+            if (method != UriMethod.GET) {
+                if (ns.readOnly)
+                    return call.respondText(
+                        "$method not allowed on $path\n",
+                        ContentType.Text.Plain,
+                        httpStatus(StatusCode.MethodNotAllowed)
+                    )
+                if (method == UriMethod.POST && scriptingConditionDone(config, inputStream!!, headers, call))
+                    return
+            }
             if (!ns.keepUrlEncoding)
                 parts = parts.map { it.urlDecode() }
             if (method == UriMethod.GET && query.page.size > config.maxPageSize)
@@ -82,12 +86,10 @@ private suspend fun requestProcessing(topContext: Context, config: Configuration
         }
         else if (method == UriMethod.GET)
             sendValue("/", "/", Response(config.routes.keys), headers, call)
+        else if (method == UriMethod.POST && scriptingConditionDone(config, inputStream!!, headers, call))
+            return
         else
-            call.respondText(
-                "$method not allowed on $path\n",
-                ContentType.Text.Plain,
-                httpStatus(StatusCode.MethodNotAllowed)
-            )
+            call.respondText("$method not allowed on $path\n", ContentType.Text.Plain, httpStatus(StatusCode.MethodNotAllowed))
     }
     catch (e: Exception) {
         val stacktrace = getStacktrace(e)
@@ -96,6 +98,26 @@ private suspend fun requestProcessing(topContext: Context, config: Configuration
         call.respondText(msg+"\n", ContentType.Text.Html, httpStatus(StatusCode.InternalServerError))
     }
     cx.close(false)
+}
+
+private suspend fun scriptingConditionDone(config: Configuration, inputStream: InputStream, headers: Map<String,Any?>, call: ApplicationCall): Boolean {
+    val type = headers["content-type"].toString()
+    val format = getFormat(type)
+    if (format == null) {
+        call.respondText("Content type not supported: $type", ContentType.Text.Plain, httpStatus(StatusCode.BadRequest))
+        return true
+    }
+    else if (!format.scripting)
+        return false
+    else if (config.scripting) {
+        val result = format.decode(inputStream, defaultCharset()) ?: ""
+        sendValue("", "", Response(result), headers, call)
+        return true
+    }
+    else {
+        call.respondText("Scripting content type not allowed on this server", ContentType.Text.Plain, httpStatus(StatusCode.Unauthorized))
+        return true
+    }
 }
 
 private suspend fun sendValue(prefix: String, suffix: String, response: Response, headers: Map<String,Any?>, call: ApplicationCall) {
@@ -144,18 +166,9 @@ private suspend fun requestBody(headers: Map<String,Any?>, inputStream: InputStr
     return withContext(Dispatchers.IO) { format.decode(inputStream, charset) }
 }
 
-private fun getMap(values: StringValues, normalize: Boolean): Map<String,Any?> {
-    val map = mutableMapOf<String,Any?>()
-    values.forEach { k, list ->
-        val key = if (normalize) k.normalize() else k
-        map[key] =  list.map{it.parse()}.simplify()
-    }
-    return map
-}
-
 private fun logRequest(method: UriMethod, uri: String, remote: String, size: Any?) {
     val bytes = if (size == null) "" else " received $size bytes"
-    println(printTime(System.currentTimeMillis())+" "+remote+" "+method+" "+uri+bytes)
+    println(printTime(System.currentTimeMillis())+" "+remote+" "+method.name+" "+uri+bytes)
 }
 
 private fun getSessionContext(call: ApplicationCall, parent: Context, headers: Map<String,Any?>): Context {

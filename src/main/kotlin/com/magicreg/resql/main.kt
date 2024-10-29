@@ -38,7 +38,8 @@ private fun startApp(configData: Map<String, Any?>) {
         host = configData["host"]?.toString() ?: "localhost",
         port = configData["port"]?.toString()?.toIntOrNull() ?: 0,
         routes = loadNamespaces(configData["routes"]),
-        maxPageSize = configData["maxPageSize"]?.toString()?.toIntOrNull() ?: 100
+        maxPageSize = configData["maxPageSize"]?.toString()?.toIntOrNull() ?: 100,
+        scripting = toBoolean(configData["scripting"])
     )
     println("configuration = "+getFormat("json")!!.encodeText(config))
     startServer(config)
@@ -55,7 +56,8 @@ private fun loadNamespaces(value: Any?): Map<String, Namespace> {
     )
     val dst = mutableMapOf<String, Namespace>()
     for (key in src.keys) {
-        val uri = src[key].toUri() ?: throw RuntimeException("Invalid uri value: ${src[value]}")
+        val value = src[key].toString()
+        val uri = if (value.isNullOrBlank()) URI("") else value.toUri() ?: throw RuntimeException("Invalid uri value: ${src[value]}")
         val ns = loadNamespace(key, uri)
         if (!addNamespace(ns))
             println("WARNING: Prefix $key or uri $uri namespace is already defined")
@@ -65,6 +67,12 @@ private fun loadNamespaces(value: Any?): Map<String, Namespace> {
 }
 
 private fun loadNamespace(prefix: String, uri: URI): Namespace {
+    if (uri.scheme == null) {
+        return if (uri.path.isNullOrBlank())
+            ContextWrapperNamespace(prefix)
+        else
+            loadNamespace(prefix, File(uri.path).canonicalFile.toURI())
+    }
     return when (uri.scheme) {
         "http", "https" -> {
             val value = uri.resolve()

@@ -77,7 +77,8 @@ class GenericFormat(
     override val extensions: List<String>,
     private val decoder: (InputStream, String) -> Any?,
     private val encoder: (Any?, OutputStream, String) -> Unit,
-    override val supported: Boolean
+    override val supported: Boolean,
+    override val scripting: Boolean
 ): Format {
     override fun decode(input: InputStream, charset: String): Any? {
         return decoder(input, charset)
@@ -99,6 +100,7 @@ private val CSV_SEPARATORS = ",;|:\t".toCharArray()
 private val JSON_SERIALIZER_CLASSES = listOf(KClass::class, KCallable::class, Class::class, Member::class, KProperty::class, Exception::class,
                                              InputStream::class, OutputStream::class, Reader::class, Writer::class, ByteArray::class, CharArray::class,
                                              Property::class, Namespace::class, Format::class)
+private val SQL_QUERY_STATEMENTS = listOf("sele", "show", "desc")
 private val CSV_FORMAT = configureCsvFormat()
 private val JSON_MAPPER = configureJsonMapper(ObjectMapper())
 private val YAML_MAPPER = configureJsonMapper(ObjectMapper(YAMLFactory()))
@@ -148,8 +150,9 @@ private fun addMimetype(mimetypes: MutableMap<String,Format>,
                         encoder: (Any?, OutputStream, String) -> Unit,
                         mimetype: String,
                         extensions: List<String>,
-                        supported: Boolean = true) {
-    val format = GenericFormat(mimetype, extensions, decoder, encoder, supported)
+                        supported: Boolean = true,
+                        scripting: Boolean = false) {
+    val format = GenericFormat(mimetype, extensions, decoder, encoder, supported, scripting)
     mimetypes[mimetype] = format
     addExtensions(format)
 }
@@ -168,7 +171,9 @@ private fun initManagedMimetypes(): MutableMap<String,Format> {
     addMimetype(formats, ::decodeHtml, ::encodeHtml, "text/html", listOf("html", "htm", "xhtml"))
     addMimetype(formats, ::decodeProperties, ::encodeProperties, "text/x-java-properties", listOf("properties"))
     addMimetype(formats, ::decodeCsv, ::encodeCsv, "text/csv", listOf("csv"))
-    addMimetype(formats, ::decodeKotlin, ::encodeKotlin, "text/x-kotlin", listOf("kts", "kt"))
+    addMimetype(formats, ::decodeKotlin, ::encodeKotlin, "text/x-kotlin", listOf("kts", "kt"), true, true)
+    addMimetype(formats, ::decodeResql, ::encodeResql, "text/x-resql", listOf("resql"), true, true)
+    addMimetype(formats, ::decodeSql, ::encodeSql, "application/sql", listOf("sql"), true, true)
     addMimetype(formats, ::decodeJson, ::encodeJson, "application/json", listOf("json"))
     addMimetype(formats, ::decodeYaml, ::encodeYaml, "application/yaml", listOf("yaml"))
     addMimetype(formats, ::decodeForm, ::encodeForm, "application/x-www-form-urlencoded", listOf("form", "urlencoded"))
@@ -238,6 +243,34 @@ private fun decodeKotlin(input: InputStream, charset: String): Any? {
 
 private fun encodeKotlin(value: Any?, output: OutputStream, charset: String) {
     output.write((value.toString()+"\n").toByteArray(Charset.forName(charset)))
+}
+
+private fun decodeResql(input: InputStream, charset: String): Any? {
+    val txt = input.readAllBytes().toString(Charset.forName(charset))
+    return txt.toExpression().execute()
+}
+
+private fun encodeResql(value: Any?, output: OutputStream, charset: String) {
+    val txt = value?.toText() ?: "()"
+    output.write(("$txt\n").toByteArray(Charset.forName(charset)))
+}
+
+private fun decodeSql(input: InputStream, charset: String): Any? {
+    val request = getContext().requestUri ?: throw RuntimeException("No current request to find database from")
+    val prefix = request.split("/").firstOrNull { it.isNotBlank() } ?: throw RuntimeException("No database on empty request path")
+    val ns = getNamespace(prefix) ?: throw RuntimeException("$prefix is not a namespace")
+    if (ns is Database) {
+        val sql = input.readAllBytes().toString(Charset.forName(charset))
+        return if (sql.trim().substring(0, 4).lowercase() in SQL_QUERY_STATEMENTS)
+            ns.query(sql)
+        else
+            ns.execute(sql)
+    }
+    throw RuntimeException("$prefix is not a database namespace")
+}
+
+private fun encodeSql(value: Any?, output: OutputStream, charset: String) {
+    throw RuntimeException("SQL encoding is not supported")
 }
 
 private fun decodeCsv(input: InputStream, charset: String): Any {
@@ -335,9 +368,9 @@ private fun encodeHtmlPart(value: Any?): String {
         for (key in map.keys) {
             val k = encodeHtmlPart(key)
             val v = encodeHtmlPart(map[key])
-            lines.add("<tr><td>$k</td><td>$v</td></tr>")
+            lines.add("<tr><td valign=top>$k</td><td valign=top>$v</td></tr>")
         }
-        "<table border=1 cellpadding=1 cellspacing=2>\n"+lines.joinToString("\n")+"\n<table>\n"
+        "<table border=1 cellpadding=1 cellspacing=2>\n"+lines.joinToString("\n")+"\n</table>\n"
     }
     else if (value.isIterable()) {
         val it = value.toIterator() ?: listOf(value).iterator()

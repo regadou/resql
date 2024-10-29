@@ -7,36 +7,38 @@ class GenericProperty(
     override val key: String
 ): Property {
     override fun getValue(): Any? {
+        val resolved = instance.resolve()
         return if (GENERIC_PROPERTIES.contains(key))
-            genericPropertyValue(key, instance)
-        else if (instance == null)
+            genericPropertyValue(key, resolved)
+        else if (resolved == null)
             null
-        else if (instance is CharSequence || instance is Collection<*> || instance::class.java.isArray) {
+        else if (resolved is CharSequence || resolved is Collection<*> || resolved::class.java.isArray) {
             val index = key.toIntOrNull() ?: return null
-            indexPropertyValue(index, instance)
+            indexPropertyValue(index, resolved)
         }
-        else if (instance is Map<*,*>)
-            instance[key]
-        else if (instance is Namespace)
-            instance.toMap()[key]
+        else if (resolved is Map<*,*>)
+            resolved[key]
+        else if (resolved is Namespace)
+            resolved.toMap()[key]
         else
-            BeanMap(instance)[key]
+            BeanMap(resolved)[key]
      }
 
     override fun setValue(value: Any?): Boolean {
-        return if (instance == null)
+        val resolved = instance.resolve()
+        return if (resolved == null)
             false
-        else if (instance is Collection<*> || instance::class.java.isArray) {
+        else if (resolved is Collection<*> || resolved::class.java.isArray) {
             val index = key.toIntOrNull() ?: return false
-            indexPropertySetValue(index, instance, value)
+            indexPropertySetValue(index, resolved, value)
         }
         else {
-            val map = if (instance is Map<*,*>)
-                instance
-            else if (instance is Namespace)
-                instance.toMap()
+            val map = if (resolved is Map<*,*>)
+                resolved
+            else if (resolved is Namespace)
+                resolved.toMap()
             else
-                BeanMap(instance)
+                BeanMap(resolved)
             try {
                 (map as MutableMap<Any?,Any?>)[key] = value
                 true
@@ -46,16 +48,18 @@ class GenericProperty(
     }
 
     override fun toString(): String {
-        val hash = instance?.hashCode()?.toString() ?: "null"
-        val type = (if (instance == null) Void::class else instance::class).simpleName
+        val resolved = instance.resolve()
+        val hash = resolved?.hashCode()?.toString() ?: "null"
+        val type = (if (resolved == null) Void::class else resolved::class).simpleName
         return "$key@$$type#$hash"
     }
 }
 
-private val GENERIC_PROPERTIES = "class,size,keys".split(",")
+private val GENERIC_PROPERTIES = "type,class,size,keys".split(",")
 
 private fun genericPropertyValue(key: String, instance: Any?): Any? {
     return when (key) {
+        "type" -> Type.entries.reversed().firstOrNull { it.isInstance(instance) } ?: Type.ANY
         "class" -> if (instance == null) Void::class else instance::class
         "size" -> {
             if (instance == null)
