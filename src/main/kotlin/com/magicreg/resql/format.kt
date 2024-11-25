@@ -100,7 +100,6 @@ private val CSV_SEPARATORS = ",;|:\t".toCharArray()
 private val JSON_SERIALIZER_CLASSES = listOf(KClass::class, KCallable::class, Class::class, Member::class, KProperty::class, Exception::class,
                                              InputStream::class, OutputStream::class, Reader::class, Writer::class, ByteArray::class, CharArray::class,
                                              Property::class, Namespace::class, Format::class)
-private val SQL_QUERY_STATEMENTS = listOf("sele", "show", "desc")
 private val CSV_FORMAT = configureCsvFormat()
 private val JSON_MAPPER = configureJsonMapper(ObjectMapper())
 private val YAML_MAPPER = configureJsonMapper(ObjectMapper(YAMLFactory()))
@@ -247,29 +246,31 @@ private fun encodeKotlin(value: Any?, output: OutputStream, charset: String) {
 
 private fun decodeResql(input: InputStream, charset: String): Any? {
     val txt = input.readAllBytes().toString(Charset.forName(charset))
-    return txt.toExpression().execute()
+    return txt.toExpression().execute().resolve()
 }
 
 private fun encodeResql(value: Any?, output: OutputStream, charset: String) {
-    val txt = value?.toText() ?: "()"
+    val txt = value?.toText() ?: "null"
     output.write(("$txt\n").toByteArray(Charset.forName(charset)))
 }
 
 private fun decodeSql(input: InputStream, charset: String): Any? {
     val request = getContext().requestUri ?: throw RuntimeException("No current request to find database from")
     val prefix = request.split("/").firstOrNull { it.isNotBlank() } ?: throw RuntimeException("No database on empty request path")
-    val ns = getNamespace(prefix) ?: throw RuntimeException("$prefix is not a namespace")
+    val ns = getContext().namespace(prefix) ?: throw RuntimeException("$prefix is not a namespace")
     if (ns is Database) {
         val sql = input.readAllBytes().toString(Charset.forName(charset))
-        return if (sql.trim().substring(0, 4).lowercase() in SQL_QUERY_STATEMENTS)
-            ns.query(sql)
-        else
-            ns.execute(sql)
+        return when (sql.trim().substring(0, 4).lowercase()) {
+            "sele", "show", "desc" -> ns.query(sql)
+            "inse", "upda", "dele" -> ns.update(sql)
+            else -> ns.execute(sql)
+        }
     }
     throw RuntimeException("$prefix is not a database namespace")
 }
 
 private fun encodeSql(value: Any?, output: OutputStream, charset: String) {
+    // TODO: we could check if it is a QUery object to convert to SQL select
     throw RuntimeException("SQL encoding is not supported")
 }
 
@@ -330,13 +331,16 @@ private fun encodeCsv(value: Any?, output: OutputStream, charset: String) {
 
 private fun decodeForm(input: InputStream, charset: String): Any? {
     val map = mutableMapOf<String,Any?>()
-    var entries = InputStreamReader(input, charset).readText().split("&")
-    for (entry in entries) {
-        val eq = entry.indexOf('=')
-        if (eq < 0)
-            setValue(map, entry, true)
-        else
-            setValue(map, entry.substring(0,eq), entry.substring(eq+1))
+    val txt = InputStreamReader(input, charset).readText()
+    if (txt.isNotBlank()) {
+        val entries = txt.split("&")
+        for (entry in entries) {
+            val eq = entry.indexOf('=')
+            if (eq < 0)
+                setValue(map, entry.urlDecode(charset), true)
+            else
+                setValue(map, entry.substring(0,eq).urlDecode(charset), entry.substring(eq+1).urlDecode(charset))
+        }
     }
     return map
 }
@@ -356,12 +360,15 @@ private fun decodeHtml(input: InputStream, charset: String): Any? {
 }
 
 private fun encodeHtml(value: Any?, output: OutputStream, charset: String) {
-    output.write(encodeHtmlPart(value).toByteArray(Charset.forName(charset)))
+    val style = getContext().configuration().style
+    val head = if (style.isNullOrBlank()) "" else "<link href='$style' rel='stylesheet'>\n"
+    // TODO: we should add a charset tag in the headers
+    output.write(encodeHtmlPart(value, head).toByteArray(Charset.forName(charset)))
 }
 
-private fun encodeHtmlPart(value: Any?): String {
+private fun encodeHtmlPart(value: Any?, head: String = ""): String {
     return if (value == null)
-        "&nbsp;"
+        "$head&nbsp;"
     else if (value.isMappable()) {
         val map = value.toMap() ?: toMap(value)
         val lines = mutableListOf<String>()
@@ -370,17 +377,17 @@ private fun encodeHtmlPart(value: Any?): String {
             val v = encodeHtmlPart(map[key])
             lines.add("<tr><td valign=top>$k</td><td valign=top>$v</td></tr>")
         }
-        "<table border=1 cellpadding=1 cellspacing=2>\n"+lines.joinToString("\n")+"\n</table>\n"
+        "$head<table border=1 cellpadding=1 cellspacing=2>\n"+lines.joinToString("\n")+"\n</table>\n"
     }
     else if (value.isIterable()) {
         val it = value.toIterator() ?: listOf(value).iterator()
         val lines = mutableListOf<String>()
         while (it.hasNext())
             lines.add(encodeHtmlPart(it.next()))
-        lines.joinToString("<br>\n")
+        head+lines.joinToString("<br>\n")
     }
     else
-        value.toText() // TODO: html encode
+        head+value.toText() // TODO: html encode
 }
 
 private fun configureCsvFormat(): CSVFormat {

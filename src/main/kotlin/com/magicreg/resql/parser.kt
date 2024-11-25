@@ -1,5 +1,7 @@
 package com.magicreg.resql
 
+import java.util.*
+
 fun parseText(txt: String): Expression {
     return parseExpression(ParseStatus(txt))
 }
@@ -31,6 +33,7 @@ private fun parseExpression(status: ParseStatus): Expression {
     var tokens = mutableListOf<Any?>()
     var token: String? = null
     var quote: Char? = null
+    var startOfLine = true
 
     fun addToken(addExpression: Boolean) {
         if (token != null) {
@@ -45,6 +48,13 @@ private fun parseExpression(status: ParseStatus): Expression {
 
     while (status.pos < status.length) {
         val c = status.chars[status.pos]
+        if (startOfLine) {
+            if (c == '#') {
+                findEndOfLine(status)
+                continue
+            }
+            startOfLine = false
+        }
         if (quote != null) {
             if (c == quote) {
                 tokens.add(token)
@@ -77,6 +87,7 @@ private fun parseExpression(status: ParseStatus): Expression {
         else if (c == '\n') {
             addToken(true)
             status.line++
+            startOfLine = true
         }
         else if (c <= ' ' || c in BLANK_NON_ASCII)
             addToken(false)
@@ -97,7 +108,7 @@ private fun parseExpression(status: ParseStatus): Expression {
     else if (expressions.size == 1)
         expressions[0]
     else
-        Expression(MiscOperator.EXECUTE, expressions)
+        Expression(MiscOperator.DO, expressions)
 }
 
 private class ParseStatus(txt: String) {
@@ -111,10 +122,22 @@ private class ParseStatus(txt: String) {
 private val BLANK_NON_ASCII = '\u007F'..'\u00AD'
 private val QUOTE_CHARS = arrayOf('"', '\'', '`')
 private val GROUP_CHARS = arrayOf('(', ')', '[', ']', '{', '}')
+private val UNIQUE_VALUE = UUID.randomUUID()
 
 private fun parseToken(token: String): Any? {
     val cx = getContext()
+    if (cx.hasConstant(token))
+        return cx.getValue(token)
     if (cx.hasName(token))
         return cx.property(token)
-    return getFunction(token) ?: token.keyword()
+    val keyword = getFunctionBySymbol(token) ?: token.keyword(UNIQUE_VALUE)
+    return if (keyword == UNIQUE_VALUE) cx.property(token) else keyword
+}
+
+private fun findEndOfLine(status: ParseStatus) {
+    while (status.pos < status.length) {
+        if (status.chars[status.pos] == '\n')
+            break
+        status.pos++
+    }
 }

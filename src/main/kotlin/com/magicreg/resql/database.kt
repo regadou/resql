@@ -7,16 +7,16 @@ import java.nio.charset.Charset
 import java.sql.*
 import kotlin.reflect.KClass
 
-class Database(originalUrl: String, originalPrefix: String? = null): Namespace {
+class Database(private val originalUrl: String, originalPrefix: String? = null): Namespace {
     override val uri = extractSecureUrl(originalUrl)
-    override var prefix = originalPrefix ?: (URI(uri).path.split("/").firstOrNull{it.isNotBlank()} ?: "")
+    private val catalog = extractCatalogName()
+    override val prefix = originalPrefix ?: catalog
     override val readOnly: Boolean = false
-    private val catalog = URI(uri).path.split("/")[1]
-    private val connection = DriverManager.getConnection(originalUrl)
+    private var connection: Connection? = null
     private enum class ResultMode { ANY, SINGLE, MULTIPLE }
 
     override val names: List<String> get() {
-        val rs = connection.metaData.getTables(catalog, null, null, arrayOf("TABLE"))
+        val rs = checkConnection().metaData.getTables(catalog, null, null, arrayOf("TABLE"))
         val tables = mutableListOf<String>()
         while (rs.next())
             tables.add(rs.getString("TABLE_NAME").lowercase())
@@ -28,8 +28,8 @@ class Database(originalUrl: String, originalPrefix: String? = null): Namespace {
         return names.contains(name)
     }
 
-    override fun value(name: String): Any? {
-        return if (name.isBlank()) this else getTable(name)
+    override fun getValue(name: String): Any? {
+        return if (name.isBlank()) this else tableColumns(name)
     }
 
     override fun setValue(name: String, value: Any?): Boolean {
@@ -42,17 +42,17 @@ class Database(originalUrl: String, originalPrefix: String? = null): Namespace {
         return false
     }
 
-    override fun apply(method: UriMethod, path: List<String>, query: Query, value: Any?): Response {
+    override fun execute(method: RestMethod, path: List<String>, query: Query, value: Any?): Response {
         return when(val state = method.name.lowercase()+path.size) {
             "get0" -> if (query.filter.isEmpty) Response(names) else selectRows(query, value?.toString())
             "get1" -> {
-                if (getTable(path[0]) == null)
+                if (tableColumns(path[0]) == null)
                     Response(StatusCode.NotFound)
                 else
                     selectRows(query.addQueryPart(".source", path[0]), value?.toString(), ResultMode.MULTIPLE)
             }
             "get2" -> {
-                val pkeys = getPrimaryKeys(path[0])
+                val pkeys = primaryKeys(path[0])
                 when (pkeys.size) {
                     0 -> return Response(StatusCode.NotFound)
                     1 -> query.addQueryPart(pkeys[0], path[1])
@@ -71,10 +71,10 @@ class Database(originalUrl: String, originalPrefix: String? = null): Namespace {
             "post2" -> updateRows(path[0], mergeRows(formatRows(value)), query.filter) // TODO: check for id conflict
             "put0" -> selectRows(query.addQueryPart(".query", value))
             "put1" -> Response(if (createTable(path[0], mergeRows(formatRows(value)))) StatusCode.OK else StatusCode.BadRequest)
-            "put2" -> updateRows(path[0], mergeRows(formatRows(value)), query.addQueryPart(getPrimaryKeys(path[0])[0], path[1]).filter) // TODO: merge with existing row with same id
+            "put2" -> updateRows(path[0], mergeRows(formatRows(value)), query.addQueryPart(primaryKeys(path[0])[0], path[1]).filter) // TODO: merge with existing row with same id
             "delete0" -> deleteRows(query)
             "delete1" -> deleteRows(query.addQueryPart(".source", path[0]))
-            "delete2" -> deleteRows(query.addQueryPart(".source", path[0]).addQueryPart(getPrimaryKeys(path[0])[0], path[1]))
+            "delete2" -> deleteRows(query.addQueryPart(".source", path[0]).addQueryPart(primaryKeys(path[0])[0], path[1]))
             else -> Response(StatusCode.NotFound)
         }
     }
@@ -83,48 +83,25 @@ class Database(originalUrl: String, originalPrefix: String? = null): Namespace {
         return uri
     }
 
-    fun getTable(table: String): Map<String,KClass<*>>? {
-        if (names.indexOf(table) < 0)
-            return null
-        val columns = mutableMapOf<String,KClass<*>>()
-        val rs = connection.metaData.getColumns(catalog,null, table,null)
-        while (rs.next()) {
-            val name = rs.getString("COLUMN_NAME").lowercase()
-            columns[name] = getResqlType(rs.getObject("DATA_TYPE"))
-        }
-        rs.close();
-        return columns;
+    fun copyWithPrefix(prefix: String): Database {
+        return Database(originalUrl, prefix)
     }
 
-    fun createTable(table: String, data: Map<String,Any?>): Boolean {
-        if (hasName(table))
-            return false
-        val columns = mutableListOf<String>()
-        for (key in data.keys)
-            columns.add(key+" "+getSqlType(data[key].toString()))
-        val sql = "create table "+table+" (\n  "+columns.joinToString(",\n  ")+"\n)\n"
-        return execute(sql)
-    }
-
-    fun getPrimaryKeys(table: String): List<String> {
+    fun primaryKeys(table: String): List<String> {
         val pkeys = mutableListOf<String>()
-        val rs = connection.metaData.getPrimaryKeys(catalog, null, table)
+        val rs = checkConnection().metaData.getPrimaryKeys(catalog, null, table)
         while (rs.next())
             pkeys.add(rs.getString("COLUMN_NAME").lowercase())
         if (pkeys.isEmpty()) {
-            val columns = getTable(table)!!
-            if (columns["id"] != null)
-                pkeys.add("id")
-            else if (columns["code"] != null)
-                pkeys.add("code")
-            else if (columns.isNotEmpty())
-                pkeys.iterator().next()
+            val pkey = tableColumns(table)!!.primaryKey(false)
+            if (pkey.isNotBlank())
+                pkeys.add(pkey)
         }
         return pkeys
     }
 
     fun query(sql: String): List<Map<String,Any?>> {
-        val statement = connection.createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
+        val statement = checkConnection().createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
         val rs = statement.executeQuery(sql)
         val rows = mutableListOf<Map<String,Any?>>()
         while (rs.next())
@@ -134,17 +111,63 @@ class Database(originalUrl: String, originalPrefix: String? = null): Namespace {
     }
 
     fun update(sql: String): Int {
-        val statement = connection.createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
+        val statement = checkConnection().createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
         val result = statement.executeUpdate(sql)
         statement.close()
         return result
     }
 
     fun execute(sql: String): Boolean {
-        val statement = connection.createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
-        val result = statement.execute(sql)
-        statement.close()
-        return result
+        try {
+            val statement = checkConnection().createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
+            statement.execute(sql)
+            statement.close()
+            return true
+        }
+        catch (e: Exception) { return false }
+    }
+
+    private fun checkConnection(): Connection {
+        try {
+            if (connection!!.isValid(100))
+                return connection!!
+        }
+        catch (e: Exception) {}
+        connection = DriverManager.getConnection(originalUrl)
+        return connection!!
+    }
+
+    private fun tableColumns(table: String): Map<String,KClass<*>>? {
+        if (names.indexOf(table) < 0)
+            return null
+        val columns = mutableMapOf<String,KClass<*>>()
+        val rs = checkConnection().metaData.getColumns(catalog,null, table,null)
+        while (rs.next()) {
+            val name = rs.getString("COLUMN_NAME").lowercase()
+            columns[name] = getKotlinType(rs.getObject("DATA_TYPE"))
+        }
+        rs.close();
+        return columns;
+    }
+
+    private fun createTable(table: String, data: Map<String,Any?>): Boolean {
+        if (hasName(table))
+            return false
+        val columns = mutableListOf<String>()
+        var foundPrimary = false
+        for (key in data.keys) {
+            val def = getSqlDefinition(data[key])
+            columns.add("$key $def")
+            if (def.lowercase().contains("primary"))
+                foundPrimary = true
+        }
+        if (!foundPrimary) {
+            val primary = data.primaryKey(false)
+            if (primary.isNotBlank())
+                columns.add("primary key ($primary)")
+        }
+        val sql = "create table "+table+" (\n  "+columns.joinToString(",\n  ")+"\n)\n"
+        return execute(sql)
     }
 
     private fun selectRows(query: Query, format: String? = null, mode: ResultMode = ResultMode.ANY): Response {
@@ -160,13 +183,13 @@ class Database(originalUrl: String, originalPrefix: String? = null): Namespace {
         if (mode == ResultMode.MULTIPLE) return createResponse(table, result, format)
         return when (result.size) {
             0 -> Response(StatusCode.NotFound)
-            1 -> Response(result[0])
+            1 -> if (mode == ResultMode.MULTIPLE) Response(result) else Response(result[0])
             else -> if (mode == ResultMode.SINGLE) Response(result) else createResponse(table, result, format)
         }
     }
 
     private fun insertRows(table: String, rows: List<Map<String,Any?>>): Response {
-        val columns = getTable(table) ?: return Response("Invalid table: $table", null, defaultCharset(), StatusCode.NotFound)
+        val columns = tableColumns(table) ?: return Response("Invalid table: $table", null, defaultCharset(), StatusCode.NotFound)
         var count = 0
         for (row in rows) {
             val keys = mutableListOf<String>()
@@ -186,9 +209,9 @@ class Database(originalUrl: String, originalPrefix: String? = null): Namespace {
     }
 
     private fun updateRows(table: String, data: Map<String,Any?>, filter: Filter): Response {
-        val columns = getTable(table) ?: return Response("Invalid table: $table", null, defaultCharset(), StatusCode.NotFound)
+        val columns = tableColumns(table) ?: return Response("Invalid table: $table", null, defaultCharset(), StatusCode.NotFound)
         val query = buildSqlClauses(filter)
-        var pkeys = getPrimaryKeys(table)
+        var pkeys = primaryKeys(table)
         var count = 0
         val values = mutableListOf<String>()
         for (key in data.keys) {
@@ -219,7 +242,7 @@ class Database(originalUrl: String, originalPrefix: String? = null): Namespace {
     private fun createResponse(table: String, rows: List<Map<String,Any?>>, format: String?): Response {
         return if (format == "text/html") {
             val links = mutableListOf<String>()
-            val pkeys = getPrimaryKeys(table)
+            val pkeys = primaryKeys(table)
             for (row in rows) {
                 val ids = mutableListOf<String>()
                 for (pkey in pkeys)
@@ -261,11 +284,16 @@ class Database(originalUrl: String, originalPrefix: String? = null): Namespace {
         return (trimurl.substring(0, index) + trimurl.substring(index+rawUserInfo.length+1)).split("?")[0]
     }
 
+    private fun extractCatalogName(): String {
+        val parts = uri.split("#")[0].split("?")[0].split("/")
+        return if (parts.isEmpty()) "" else parts[parts.size-1]
+    }
+
     private fun formatRows(value: Any?): List<Map<String,Any?>> {
         return if (value is Map<*,*>)
             listOf(value as Map<String,Any?>)
         else if (value is Collection<*> || value is Array<*>)
-            value.toCollection().map{x -> toMap(x).mapKeys{k -> k.toString()}}
+            value.toCollection().map{toMap(it).mapKeys{e->e.key.toString()}}
         else if (value == null)
             emptyList()
         else if (value is CharSequence && value.isBlank())
@@ -297,18 +325,71 @@ class Database(originalUrl: String, originalPrefix: String? = null): Namespace {
         return map
     }
 
-    private fun getSqlType(def: String): String {
-        return when (def) {
-            "int", "date", "time", "timestamp" -> def
-            "integer" -> "int"
-            "number" -> "double"
-            "boolean" -> "bit"
-            "string" -> "varchar(255)"
-            else -> "text"
+    private fun getSqlDefinition(value: Any?): String {
+        var type: Any? = null
+        var size: Int? = null
+        var def = mutableListOf<String>()
+        val iterator = if (value.isIterable())
+            value.toIterator()
+        else if (value.isMappable())
+            value.toMap()?.values?.iterator()
+        else
+            null
+        if (iterator == null)
+            type = value
+        else {
+            while (iterator.hasNext()) {
+                val item = iterator.next()
+                if (item.isEmpty())
+                    continue
+                else if (item is Number)
+                    size = item.toInt()
+                else if (item.isIterable())
+                    def.addAll(item.toCollection().map{it.toText()})
+                else if (item.isMappable())
+                    def.addAll(item.toMap()!!.values.map{it.toText()})
+                else if (type == null)
+                    type = item
+                else if (item is KClass<*> || item is Class<*>) {
+                    if (type is String)
+                        def.add(type)
+                    type = item
+                }
+                else
+                    def.add(item.toText(true))
+            }
         }
+        if (type.isEmpty() && def.isNotEmpty())
+            type = def.removeAt(0)
+        val sqlType = getSqlType(type)
+        return when (sqlType) {
+            "int", "double", "date", "time", "timestamp" -> sqlType
+            "integer", "long", "short", "byte" -> "int"
+            "number", "float" -> "double"
+            "boolean" -> "bit"
+            "localdate" -> "date"
+            "localdatetime" -> "timestamp"
+            "localtime" -> "time"
+            "duration" -> "double"
+            "string" -> "varchar("+(size ?: 255)+")"
+            else -> if (size == null) "text" else "varchar($size)"
+        }+" "+def.joinToString(" ")
     }
 
-    private fun getResqlType(sqlType: Any?): KClass<*> {
+    private fun getSqlType(value: Any?): String {
+        return if (value is Number)
+            getClassName(getKotlinType(value))
+        else if (value is Type)
+            getClassName(value.classes[0])
+        else if (value is KClass<*>)
+            getClassName(value)
+        else if (value is Class<*>)
+            getClassName(value.kotlin)
+        else
+            value.toText().lowercase()
+    }
+
+    private fun getKotlinType(sqlType: Any?): KClass<*> {
         if (sqlType == null)
             return Any::class
         return when (sqlType.toString().toInt()) {
@@ -348,6 +429,12 @@ class Database(originalUrl: String, originalPrefix: String? = null): Namespace {
 
             else -> Any::class
         }
+    }
+
+    private fun getClassName(klass: KClass<*>): String {
+        if (klass.qualifiedName == "java.util.Date")
+            return "timestamp"
+        return klass.simpleName?.lowercase() ?: ""
     }
 
     private fun getUpdateClause(item: Map<String,Any?>, keys: List<String>): String {

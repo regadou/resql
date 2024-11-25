@@ -39,7 +39,9 @@ private fun startApp(configData: Map<String, Any?>) {
         port = configData["port"]?.toString()?.toIntOrNull() ?: 0,
         routes = loadNamespaces(configData["routes"]),
         maxPageSize = configData["maxPageSize"]?.toString()?.toIntOrNull() ?: 100,
-        scripting = toBoolean(configData["scripting"])
+        scripting = toBoolean(configData["scripting"]),
+        home = configData["home"]?.toString(),
+        style = configData["style"]?.toString()
     )
     println("configuration = "+getFormat("json")!!.encodeText(config))
     startServer(config)
@@ -56,12 +58,9 @@ private fun loadNamespaces(value: Any?): Map<String, Namespace> {
     )
     val dst = mutableMapOf<String, Namespace>()
     for (key in src.keys) {
-        val value = src[key].toString()
-        val uri = if (value.isNullOrBlank()) URI("") else value.toUri() ?: throw RuntimeException("Invalid uri value: ${src[value]}")
-        val ns = loadNamespace(key, uri)
-        if (!addNamespace(ns))
-            println("WARNING: Prefix $key or uri $uri namespace is already defined")
-        dst[key] = ns
+        val route = src[key]?.toString()
+        val uri = if (route.isNullOrBlank()) URI("") else route.toUri() ?: throw RuntimeException("Invalid uri value: ${src[key]}")
+        dst[key] = loadNamespace(key, uri)
     }
     return dst
 }
@@ -86,11 +85,15 @@ private fun loadNamespace(prefix: String, uri: URI): Namespace {
             val file = File(uri.path)
             if (file.isDirectory)
                 FolderNamespace(file, prefix)
-            else
-                MemoryNamespace(prefix, uri.toString(), true).populate(toMap(uri.resolve()) as Map<String, Any?>)
+            else {
+                val value = uri.resolve()
+                // TODO: check if it is a zip or tgz archive to be managed like a folder
+                MemoryNamespace(prefix, uri.toString(), true).populate(toMap(value) as Map<String, Any?>)
+            }
         }
         "jdbc" -> Database(uri.toString(), prefix)
         "data" -> MemoryNamespace(prefix, uri.toString().split(",")[0].split(";")[0], true).populate(toMap(uri.resolve()) as Map<String, Any?>)
+        // TODO: support sftp uri scheme as if it was a mounted remote file
         else -> throw RuntimeException("Uri scheme not supported for namespaces: ${uri.scheme}")
     }
 }

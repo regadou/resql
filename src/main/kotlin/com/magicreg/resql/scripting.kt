@@ -49,7 +49,7 @@ class ContextBindings(private val cx: Context): Bindings, AbstractMap<String,Any
     }
 
     override fun put(key: String, value: Any?): Any? {
-        val old = cx.value(key)
+        val old = cx.getValue(key)
         cx.setValue(key, value)
         return old
     }
@@ -60,13 +60,13 @@ class ContextBindings(private val cx: Context): Bindings, AbstractMap<String,Any
     }
 
     override fun remove(key: String): Any? {
-        val old = cx.value(key)
+        val old = cx.getValue(key)
         cx.setValue(key, null)
         return old
     }
 
     override val entries: MutableSet<MutableMap.MutableEntry<String, Any?>> get() {
-        return cx.names.map { MapEntry(it, cx.value(it)) }.toMutableSet()
+        return cx.names.map { MapEntry(it, cx.getValue(it)) }.toMutableSet()
     }
 
     override val keys: MutableSet<String> get() {
@@ -74,7 +74,7 @@ class ContextBindings(private val cx: Context): Bindings, AbstractMap<String,Any
     }
 
     override val values: MutableCollection<Any?> get() {
-        return cx.names.map { cx.value(it) }.toMutableList()
+        return cx.names.map { cx.getValue(it) }.toMutableList()
     }
 
 }

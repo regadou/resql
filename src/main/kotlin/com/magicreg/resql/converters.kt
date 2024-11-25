@@ -15,8 +15,7 @@ import java.time.format.DateTimeFormatter
 import java.time.temporal.Temporal
 import java.util.*
 import kotlin.reflect.*
-import kotlin.reflect.full.memberProperties
-import kotlin.reflect.jvm.*
+import kotlin.reflect.full.*
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.toKotlinDuration
@@ -63,35 +62,7 @@ fun toCharSequence(value: Any?): CharSequence {
 }
 
 fun toString(value: Any?): String {
-    if (value.isText())
-        return value.toText()
-    if (value is Date)
-        return printDate(value)
-    if (value is KClass<*>)
-        return value.qualifiedName ?: value.java.name
-    if (value is KFunction<*>) {
-        val exec = value.javaMethod ?: value.javaConstructor
-        val prefix = if (exec == null) "" else "${toString(exec.declaringClass)}."
-        return "$prefix${value.name}"
-    }
-    if (value is KProperty<*>) {
-        val java = value.javaField ?: value.javaGetter
-        val prefix = if (java == null) "" else "${toString(java.declaringClass)}."
-        return "$prefix${value.name}"
-    }
-    if (value is Class<*>)
-        return value.name
-    if (value is Member)
-        return "${toString(value.declaringClass)}.${value.name}"
-    if (value is Map.Entry<*,*>)
-        return toString(value.key)+"="+toString(value.value)
-    if (value == null)
-        return ""
-    val iterator = value.toIterator()
-    if (iterator != null)
-        return "(" + toCollection(iterator).joinToString(" ") { toString(it) } + ")"
-    // TODO: check if there is a name or label property which is a String
-    return value.toString()
+    return value.toText()
 }
 
 fun toChar(value: Any?): Char {
@@ -425,7 +396,7 @@ fun toNamespace(value: Any?): Namespace {
             mapping = (arg as Map<String,Any?>).toMutableMap()
     }
     if (args.size == 1 && prefix != null)
-        return getNamespace(prefix) ?: throw RuntimeException("Invalide namespace: $prefix")
+        return getContext().namespace(prefix) ?: throw RuntimeException("Invalide namespace: $prefix")
     if (mapping == null && uri != null) {
         val value = URI(uri).get()
         if (value is Namespace)
@@ -503,11 +474,17 @@ fun toExpression(value: Any?): Expression {
         return value
     if (value.isText())
         return value.toText().toExpression()
-    if (value.isIterable())
-        return compileExpression(value.toCollection())
     if (value == null)
         return Expression()
-    return Expression(null, listOf(value))
+    val tokens = value.toCollection().map {
+        if (it is Property)
+            it.getValue()
+        else if (it is Map.Entry<*,*>)
+            it.value
+        else
+            it
+    }
+    return compileExpression(tokens)
 }
 
 private val FALSE_WORDS = "false,no,0,none,empty".split(",")
@@ -515,7 +492,7 @@ private val converters = initConverters()
 
 private fun initConverters(): MutableMap<KClassifier, KFunction<Any?>> {
     val map = mutableMapOf<KClassifier, KFunction<*>>()
-    for (function in arrayOf(
+    for (func in arrayOf(
         ::toString,
         ::toCharSequence,
         ::toByteArray,
@@ -549,7 +526,7 @@ private fun initConverters(): MutableMap<KClassifier, KFunction<Any?>> {
         ::toFunction,
         ::toExpression
     )) {
-        map[function.returnType.classifier!!] = function
+        map[func.returnType.classifier!!] = func
     }
     return map
 }
@@ -567,10 +544,4 @@ private fun numericValue(value: Any?, defaultValue: Number?): Number? {
             return n
     }
     return defaultValue
-}
-
-private fun printDate(date: Date): String {
-    if (date is java.sql.Timestamp || date is java.sql.Time || date is java.sql.Date)
-        return date.toString()
-    return java.sql.Timestamp(date.time).toString()
 }

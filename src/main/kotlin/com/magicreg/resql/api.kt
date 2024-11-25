@@ -4,6 +4,7 @@ import io.ktor.util.*
 import org.apache.commons.beanutils.BeanMap
 import org.w3c.dom.Document
 import java.io.*
+import java.lang.reflect.Member
 import java.net.URI
 import java.net.URL
 import java.net.URLDecoder
@@ -17,28 +18,33 @@ import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 import java.time.temporal.Temporal
 import java.util.*
+import kotlin.reflect.KCallable
 import kotlin.reflect.KClass
+import kotlin.reflect.full.superclasses
 import kotlin.text.toCharArray
 
-enum class Type(override val symbol: String, vararg val classes: KClass<*>): Function {
-    ANY("A", Any::class),
-    NUMBER("n", Number::class, Boolean::class),
-    FUNCTION("f", Function::class),
-    ENTITY("e", Map::class),
-    COLLECTION("c", List::class, Array::class, Iterable::class, Iterator::class, Enumeration::class),
-    TEXT("t", String::class),
-    DOCUMENT("d", Document::class);
-    // TODO: where does type, namespace, format, property, expression fit into all this ?
+enum class Type(vararg val classes: KClass<*>): Function {
+    ANY(Any::class),
+    NUMBER(Number::class, Boolean::class),
+    FUNCTION(Function::class),
+    ENTITY(Map::class),
+    COLLECTION(List::class, Array::class, Iterable::class, Iterator::class, Enumeration::class),
+    TEXT(String::class),
+    DOCUMENT(Document::class);
+    // TODO: where does type, namespace, format, property, mapentry, expression fit into all this ?
 
     override val id = this.name.lowercase()
-    override val function = { args: List<Any?> ->
-        val value = args.simplify()
+    override val symbol: String = ""
+    override val lambda = { args: List<Any?> ->
         if (this == TEXT)
-            value.toText()
-        else if (isInstance(value))
-            value
-        else
-            convert(value, classes[0])
+            args.joinToString("") { it.resolve(true).toText(false) }
+        else {
+            val value = args.simplify()
+            if (isInstance(value))
+                value
+            else
+                convert(value, classes[0])
+        }
     }
     override fun toString(): String { return "$id()" }
 
@@ -55,25 +61,17 @@ enum class Type(override val symbol: String, vararg val classes: KClass<*>): Fun
     }
 }
 
-enum class UriMethod(override val symbol: String): Function {
-    GET("?="),
-    POST("+="),
-    PUT(":="),
-    DELETE("-=");
+enum class RestMethod(override val symbol: String, override val lambda: (List<Any?>) -> Any?): Function {
+    GET("?=", ::get_func),
+    POST("+=", ::post_func),
+    PUT(":=", ::put_func),
+    DELETE("-=", ::delete_func);
 
     override val id = this.name.lowercase()
-    override val function = { args: List<Any?> -> executeUriMethod(this, args) }
     override fun toString(): String { return "$id()" }
-    fun defaultValue(value: Any?): Any? {
-        return when (this) {
-            GET -> value.resolve()
-            POST, PUT -> null
-            DELETE -> false
-        }
-    }
 }
 
-enum class CompareOperator(override val symbol: String, override val function: (List<Any?>) -> Any?): Function {
+enum class CompareOperator(override val symbol: String, override val lambda: (List<Any?>) -> Any?): Function {
     LESS("<", ::less_func), NOT_LESS(">=", ::not_less_func),
     EQUAL("=", ::equal_func), NOT_EQUAL("!=", ::not_equal_func),
     MORE(">", ::more_func), NOT_MORE("<=", ::not_more_func),
@@ -85,7 +83,7 @@ enum class CompareOperator(override val symbol: String, override val function: (
     override fun toString(): String { return "$id()" }
 }
 
-enum class LogicOperator(override val symbol: String, override val function: (List<Any?>) -> Any?): Function {
+enum class LogicOperator(override val symbol: String, override val lambda: (List<Any?>) -> Any?): Function {
     OR("|", ::or_func),
     AND("&", ::and_func);
 
@@ -93,7 +91,7 @@ enum class LogicOperator(override val symbol: String, override val function: (Li
     override fun toString(): String { return "$id()" }
 }
 
-enum class MathOperator(override val symbol: String, override val function: (List<Any?>) -> Any?): Function {
+enum class MathOperator(override val symbol: String, override val lambda: (List<Any?>) -> Any?): Function {
     ADD("+", ::add_func),
     REMOVE("-", ::remove_func),
     MULTIPLY("*", ::multiply_func),
@@ -107,10 +105,16 @@ enum class MathOperator(override val symbol: String, override val function: (Lis
     override fun toString(): String { return "$id()" }
 }
 
-enum class MiscOperator(override val symbol: String, override val function: (List<Any?>) -> Any?): Function {
-    EXECUTE(";", ::execute_func),
-    PROPERTY("#", ::property_func),
-    ALL("A", ::all_func);
+enum class MiscOperator(override val symbol: String, override val lambda: (List<Any?>) -> Any?): Function {
+    JOIN(",", ::join_func),
+    DO(";", ::do_func),
+    HAVE("#", ::have_func),
+    OF("@#", ::of_func),
+    WITH("?", ::with_func),
+    SORT(">>", ::sort_func),
+    EACH("?*", ::each_func),
+    SCHEMA("", ::schema_func),
+    PRINT("", ::print_func);
 
     override val id = this.name.lowercase()
     override fun toString(): String { return "$id()" }
@@ -121,8 +125,41 @@ data class Configuration(
     val port: Int = 0,
     val routes: Map<String,Namespace> = emptyMap(),
     val maxPageSize: Int = 100,
-    val scripting: Boolean = false
+    val scripting: Boolean = false,
+    var home: String? = null,
+    var style: String? = null
 )
+
+enum class ErrorMode {
+    SILENT, PRINT, RESPONSE, THROW;
+
+    fun wrap(value: Any?): Any? {
+        val code = if (value is Response) value.status else if (value is Throwable) StatusCode.InternalServerError else StatusCode.OK
+        return wrap(code, value)
+    }
+
+    fun wrap(code: StatusCode, value: Any?): Any? {
+        when (this) {
+            SILENT -> {}
+            PRINT -> {
+                if (code.code >= 400) {
+                    if (value is Response)
+                        println("${value.status.code} ${code.message}")
+                    else
+                        println("${code.code} ${code.message}")
+                }
+            }
+            RESPONSE -> return if (value is Response) value else Response(value, null,  defaultCharset(), code)
+            THROW -> {
+                if (code.code >= 400) {
+                    val message = value ?: code.message
+                    throw RuntimeException("$code $message")
+                }
+            }
+        }
+        return if (value is Response) value.renderValue() else value
+    }
+}
 
 data class Expression(
     val function: Function? = null,
@@ -140,16 +177,16 @@ data class Expression(
     override fun toString(): String {
         val name = function?.id ?: ""
         val space = if (function == null) "" else " "
-        return "("+name+space+parameters.joinToString(" ")+")"
+        return "("+name+space+parameters.joinToString(" "){it.toText(true)}+")"
     }
 }
 
 interface Function {
     val id: String
     val symbol: String
-    val function: (List<Any?>) -> Any?
+    val lambda: (List<Any?>) -> Any?
     fun execute(args: List<Any?>): Any? {
-        return function(args)
+        return lambda(args)
     }
 }
 
@@ -173,6 +210,26 @@ interface Format {
     }
 }
 
+class GeoLocation(var uri: URI) {
+    init {
+        if (uri.scheme != "geo")
+            throw RuntimeException("Invalid uri scheme for geolocation: ${uri.scheme}")
+    }
+    private val parts = uri.toString().substring(4).split(";")[0].split(",").map {it.toDouble()}
+
+    val latitude = getCoordinate(0)
+    val longitude = getCoordinate(1)
+    val altitude = getCoordinate(2)
+
+    override fun toString(): String {
+        return "geo:"+parts.joinToString(",")
+    }
+
+    fun getCoordinate(index: Int): Double {
+        return if (index < 0 || index >= parts.size) 0.0 else parts[index]
+    }
+}
+
 interface Namespace {
     val prefix: String
     val uri: String
@@ -181,27 +238,52 @@ interface Namespace {
     val isEmpty: Boolean get() { return names.isEmpty() }
     val names: List<String>
     fun hasName(name: String): Boolean
-    fun value(name: String): Any?
+    fun getValue(name: String): Any?
     fun setValue(name: String, value: Any?): Boolean
 
-    fun toMap(): MutableMap<String,Any?> {
-        return MapAdapter(
-            { this.names.toSet() },
-            { this.value(toString(it)) },
-            if (this.readOnly) { _, _ -> null } else { k, v -> this.setValue(toString(k), v) },
-            if (this.readOnly) { _ -> null } else { k -> this.setValue(toString(k), null) }
-        )
-    }
+    fun execute(method: RestMethod, path: List<String>, query: Query, value: Any?): Response {
+        if (path.isEmpty())
+            return Response(this)
+        var parent: Any? = this
+        val last = path.size - (if (method == RestMethod.PUT || method == RestMethod.DELETE) 2 else 1)
+        for (index in 0 .. last) {
+            val key = path[index]
+            parent =  parent.property(key).getValue()
+        }
 
-    fun apply(method: UriMethod, path: List<String>, query: Query, value: Any?): Response {
-        val result = method.execute(toMap(), path, query, value)
-        return if (result == null)
+        val result = when (method) {
+            RestMethod.GET -> if (query.isEmpty()) parent else query.filter.filter(parent)
+            RestMethod.POST -> {
+                if (parent is MutableCollection<*>) {
+                    val c = parent as MutableCollection<Any?>
+                    c.add(value)
+                    (if (c is List<*>) c else c.toList())[c.size-1]
+                }
+                else
+                    null
+            }
+            RestMethod.PUT -> {
+                if (parent == null)
+                    null
+                else {
+                    val key = path[path.size - 1]
+                    val property = parent.property(key)
+                    property.setValue(value)
+                    property.getValue()
+                }
+            }
+            RestMethod.DELETE -> parent?.property(path[path.size-1])?.removeValue() ?: false
+        }
+
+        return if (result is Response)
+            result
+        else if (result == null)
             Response(StatusCode.NotFound)
-        else if (method == UriMethod.DELETE && result is Boolean)
+        else if (method == RestMethod.DELETE && result is Boolean)
             Response(if (result) StatusCode.NoContent else StatusCode.NotFound)
         else
             Response(result)
-   }
+    }
 }
 
 interface Property {
@@ -209,10 +291,20 @@ interface Property {
     val key: String
     fun getValue(): Any?
     fun setValue(value: Any?): Boolean
+    fun removeValue(): Boolean
 }
 
 data class Response(val data: Any?, val type: String? = null, val charset: String = defaultCharset(), val status: StatusCode = StatusCode.OK) {
     constructor(statusCode: StatusCode): this(statusCode.message, null, defaultCharset(), statusCode)
+    constructor(statusCode: StatusCode, message: String): this(message, null, defaultCharset(), statusCode)
+    fun renderValue(): Any? {
+        return if (this.status.code >= 400)
+            this.status
+        else if (this.data is InputStream)
+            getFormat(this.type ?: "text/plain")!!.decode(this.data, this.charset ?: defaultCharset())
+        else
+            this.data
+    }
 }
 
 enum class StatusCode(val code: Int) {
@@ -245,6 +337,12 @@ fun defaultCharset(charset: String? = null): String {
     return defaultCharset
 }
 
+fun defaultContentType(contentType: String? = null): String {
+    if (contentType != null)
+        defaultContentType = contentType
+    return defaultContentType
+}
+
 fun <T: Any> convert(value: Any?, type: KClass<T>): T {
     if (type.isInstance(value))
         return value as T
@@ -268,6 +366,8 @@ fun Any?.resolve(deepResolving: Boolean = false): Any? {
         return this.toURI().get().resolve(deepResolving)
     if (this is File)
         return this.toURI().get().resolve(deepResolving)
+    if (this is Response)
+        return this.renderValue()
     if (deepResolving) {
         if (this.isText()) {
             val txt = this.toText()
@@ -276,7 +376,7 @@ fun Any?.resolve(deepResolving: Boolean = false): Any? {
                 return uri.get().resolve(true)
             val cx = getContext()
             if (cx.hasName(txt))
-                return cx.value(txt).resolve(true)
+                return cx.getValue(txt).resolve(true)
             return txt
         }
         if (this is Collection<*>)
@@ -310,8 +410,14 @@ fun Any?.simplify(resolve: Boolean = false): Any? {
     return value.map{it.simplify(true)}
 }
 
-fun Any?.property(key: String): Property {
-    return GenericProperty(this, key)
+fun Any?.property(keys: Any?): Property {
+    val key = keys.simplify()
+    return if (key.isIterable())
+        CollectionProperty(this, key.toCollection().map { it.toText() })
+    else if (key.isMappable())
+        CollectionProperty(this, key.toMap()!!.keys.map { it.toText() })
+    else
+        GenericProperty(this, key.toText())
 }
 
 fun Any?.isReference(): Boolean {
@@ -359,17 +465,9 @@ fun Any?.isText(): Boolean {
                                 || (this is Array<*> && (this.isArrayOf<Char>() || this.isArrayOf<Byte>()))
 }
 
-fun Any?.toText(): String {
+fun Any?.toText(printNull: Boolean = false, joinChar: String = ",", keyValue: String? = "="): String {
     if (this is CharSequence || this is Char)
         return this.toString()
-    if (this is File)
-        return this.toURI().toString()
-    if (this is URI)
-        return this.toString()
-    if (this is URL)
-        return this.toURI().toString()
-    if (this is Namespace)
-        return this.uri
     if (this is CharArray)
         return this.joinToString("")
     if (this is ByteArray)
@@ -382,36 +480,74 @@ fun Any?.toText(): String {
             return ByteArray(this.size){array[it]}.toString(Charset.forName("utf8"))
         }
     }
+    if (this is Date) {
+        if (this is java.sql.Timestamp || this is java.sql.Time || this is java.sql.Date)
+            return this.toString()
+        return java.sql.Timestamp(this.time).toString()
+    }
+    if (this is File)
+        return this.toURI().toString()
+    if (this is URI)
+        return this.toString()
+    if (this is URL)
+        return this.toURI().toString()
+    if (this is Function)
+        return this.id
+    if (this is Property)
+        return this.key
+    if (this is KCallable<*>)
+        return this.name
+    if (this is KClass<*>)
+        return this.qualifiedName ?: this.java.name
+    if (this is Class<*>)
+        return this.kotlin.qualifiedName ?: this.name
+    if (this is Member)
+        return "${toString(this.declaringClass)}.${this.name}"
+    if (this is Namespace)
+        return if (this.prefix.isBlank()) this.uri else this.prefix+":/"
+    if (this is Map.Entry<*,*>)
+        return this.key.toText(printNull, joinChar, keyValue)
+    if (this.isMappable()) {
+        return if (keyValue == null)
+            "(" + this.toMap()!!.entries.joinToString(joinChar) { it.value.toText(printNull, joinChar, keyValue) } + ")"
+        else
+            "(" + this.toMap()!!.entries.joinToString(joinChar) { it.key.toText( printNull, joinChar, keyValue) + keyValue + it.value.toText(printNull, joinChar, keyValue) } + ")"
+    }
+    if (this.isIterable())
+        return "("+this.toCollection().joinToString(joinChar){it.toText(printNull, joinChar, keyValue)}+")"
     if (this is InputStream)
-        return this.readBytes().toString(Charset.forName("utf8"))
+        return this.readBytes().toString(Charset.forName(defaultCharset()))
     if (this is Reader)
         return this.readText()
-    if (this.isIterable())
-        return "("+this.toIterator()!!.asSequence().joinToString(","){it.toText()}+")"
-    if (this.isMappable())
-        return "("+this.toMap()!!.entries.joinToString(","){it.key.toText()+"="+it.value.toText()}+")"
     if (this == null)
-        return ""
+        return if (printNull) "null" else ""
     return this.toString()
 }
 
 fun Any?.isMappable(): Boolean {
-    return this is Map<*,*> || this is Namespace || this is Map.Entry<*,*> || this is Property || this is StringValues || (this != null && this::class.isData)
+    return this is Map<*,*> || this is Namespace || this is Map.Entry<*,*> || this is Property || this is Pair<*,*> || this is StringValues || (this != null && this::class.isData)
 }
 
 fun Any?.toMap(): Map<Any?,Any?>? {
     if (this is Map<*,*>)
         return this as Map<Any?,Any?>
     if (this is Namespace)
-        return this.toMap() as Map<Any?,Any?>
+        return MapAdapter(
+            { this.names.toSet() },
+            { this.getValue(toString(it)) },
+            if (this.readOnly) { _, _ -> null } else { k, v -> this.setValue(toString(k), v) },
+            if (this.readOnly) { _ -> null } else { k -> this.setValue(toString(k), null) }
+        )
     if (this is Map.Entry<*,*>)
         return mapOf(this.key to this.value)
     if (this is Property)
         return mapOf(this.key to this.getValue())
+    if (this is Pair<*,*>)
+        return mapOf(this)
     if (this is StringValues) {
         val map = mutableMapOf<Any?,Any?>()
         this.forEach { key, list ->
-            map[key] =  list.map{it.keyword()}.simplify()
+            map[key] =  list.map{it.keyword(it)}.simplify()
         }
         return map
     }
@@ -424,8 +560,16 @@ fun Any?.toMap(): Map<Any?,Any?>? {
                 map[item.key] = item.value
             else if (item is Property)
                 map[item.key] = item.getValue()
+            else if (item is Pair<*,*>)
+                map[item.first] = item.second
+            else if (item.isMappable()) {
+                val src = item.toMap()!!
+                val key = src.primaryKey(true)
+                if (key.isNotBlank())
+                    map[key] = src
+            }
             else
-                return null
+                map[map.size] = item
         }
         return map
     }
@@ -467,63 +611,6 @@ fun Any?.toCollection(): List<Any?> {
         this.toList()
     else
         this.toIterator()?.asSequence()?.toList() ?: listOf(this)
-}
-
-fun Any?.toUri(): URI? {
-    if (this is URI)
-        return this
-    if (this is URL)
-        return this.toURI()
-    if (this is File)
-        return this.canonicalFile.toURI()
-    if (this.isText()) {
-        val txt = this.toText().trim()
-        try {
-            if (txt.startsWith("/") || txt.startsWith("./") || txt.startsWith("../"))
-                return File(txt).canonicalFile.toURI()
-            val scheme = if (txt.contains(":")) txt.substring(0, txt.indexOf(":")) else null
-            if (scheme != null && (isBuiltinUriScheme(scheme) || getNamespace(scheme) != null))
-                return URI(txt)
-            // TODO: test word against all context configured default namespaces prefixes
-        } catch (e: Exception) {}
-    }
-    return null
-}
-
-fun URI.readOnly(): Boolean {
-    val uri = resolveRelativeTemplate(this)
-    if (uri.scheme == "data" && uri.toString().indexOf(",") < 0)
-        return false
-    return getNamespace(uri.scheme)?.readOnly ?: arrayOf("data", "geo", "resql").contains(uri.scheme)
-}
-
-fun URI.contentType(): String? {
-    return when (this.scheme) {
-        "data" -> this.toString().split(",")[0].split(";")[0].split(":")[1]
-        "file" -> if (File(this.path).isDirectory) "inode/directory" else detectFileType(this.path)
-        "ftp", "sftp", "ftps" -> detectFileType(this.path)
-        "http", "https" -> {
-            val type = this.toURL().openConnection().contentType
-            if (type == null) null else type.split(";")[0].trim()
-        }
-        else -> null
-    }
-}
-
-fun URI.get(headers: Map<String,String> = mapOf()): Any? {
-    return resolveUri(resolveRelativeTemplate(this), UriMethod.GET, headers, null)
-}
-
-fun URI.post(value: Any?, headers: Map<String,String> = mapOf()): Any? {
-    return resolveUri(resolveRelativeTemplate(this), UriMethod.POST, headers, value)
-}
-
-fun URI.put(value: Any?, headers: Map<String,String> = mapOf()): Any? {
-    return resolveUri(resolveRelativeTemplate(this), UriMethod.PUT, headers, value)
-}
-
-fun URI.delete(headers: Map<String,String> = mapOf()): Any? {
-    return resolveUri(resolveRelativeTemplate(this), UriMethod.DELETE, headers, null)
 }
 
 fun Any?.toCompareOperator(throwOnFail: Boolean = false): CompareOperator? {
@@ -574,84 +661,57 @@ fun Any?.toMathOperator(throwOnFail: Boolean = false): MathOperator? {
         return null
 }
 
-// TODO: if method is delete and query is not empty: use it to select items to delete
-fun UriMethod.execute(root: MutableMap<String,Any?>, path: List<String>, query: Query, value: Any?): Any? {
-    if (path.isEmpty())
-        return root
-    if (path.size == 1) {
-        val key = path[0]
-        return when (this) {
-            UriMethod.GET -> if (query.isEmpty()) root[key] else query.filter.filter(root[key])
-            UriMethod.POST -> {
-                if (value is MutableCollection<*>) {
-                    (value as MutableCollection<Any?>).add(value)
-                    value.toList()[value.size-1]
-                }
-                else
-                    null
-            }
-            UriMethod.PUT -> {
-                root[key] = value
-                root[key]
-            }
-            UriMethod.DELETE -> root.remove(key)
-        }
+fun Any?.toUri(): URI? {
+    if (this is URI)
+        return this
+    if (this is URL)
+        return this.toURI()
+    if (this is File)
+        return this.canonicalFile.toURI()
+    if (this.isText()) {
+        val txt = this.toText().trim()
+        try {
+            if (txt.startsWith("./") || txt.startsWith("../") || (txt.startsWith("/") && txt.length > 1))
+                return File(txt).canonicalFile.toURI()
+            val scheme = if (txt.contains(":")) txt.substring(0, txt.indexOf(":")) else null
+            if (scheme != null && isValidUriScheme(scheme))
+                return URI(txt)
+        } catch (e: Exception) {}
     }
+    return null
+}
 
-    val values = Array<Any?>(path.size){null}
-    for (index in path.indices) {
-        val key = path[index]
-        val result = if (index == 0)
-            root[key].resolve()
-        else {
-            val parent = values[index - 1]
-            parent.property(key).getValue()
+fun URI.contentType(): String? {
+    return when (this.scheme) {
+        "data" -> this.toString().split(",")[0].split(";")[0].split(":")[1]
+        "file" -> if (File(this.path).isDirectory) "inode/directory" else detectFileType(this.path)
+        "ftp", "sftp", "ftps" -> detectFileType(this.path)
+        "http", "https" -> {
+            val type = this.toURL().openConnection().contentType
+            if (type == null) null else type.split(";")[0].trim()
         }
-        if (this == UriMethod.PUT) {
-            if (result == null)
-                break
-            values[index] = result
-            if (index+2 >= path.size)
-                break
-        }
-        else if (result != null)
-            values[index] = result
-        else if (this == UriMethod.DELETE)
-            return false
-        else
-            return null
-    }
-
-    return when (this) {
-        UriMethod.GET -> if (query.isEmpty()) values[values.size-1] else query.filter.filter(values[values.size-1])
-        UriMethod.POST -> {
-            val result = values[values.size-1]
-            if (result is MutableCollection<*>) {
-                (result as MutableCollection<Any?>).add(value)
-                value
-            }
-            else
-                null
-        }
-        UriMethod.PUT -> {
-            val parent = values[values.size - 2]
-            if (parent == null)
-                null
-            else {
-                val key = path[path.size - 1]
-                val property = parent.property(key)
-                property.setValue(value)
-                property.getValue()
-            }
-        }
-        UriMethod.DELETE -> {
-            values[values.size-2].property(path[path.size-1]).setValue(null)
-        }
+        else -> null
     }
 }
 
-fun String.keyword(): Any? {
-    return when (this.trim()) {
+fun URI.get(headers: Map<String,String> = mapOf()): Any? {
+    return resolveUri(this, RestMethod.GET, headers, null)
+}
+
+fun URI.post(value: Any?, headers: Map<String,String> = mapOf()): Any? {
+    return resolveUri(this, RestMethod.POST, headers, value)
+}
+
+fun URI.put(value: Any?, headers: Map<String,String> = mapOf()): Any? {
+    return resolveUri(this, RestMethod.PUT, headers, value)
+}
+
+fun URI.delete(headers: Map<String,String> = mapOf()): Any? {
+    return resolveUri(this, RestMethod.DELETE, headers, null)
+}
+
+fun String.keyword(defaultValue: Any?): Any? {
+    return when (this.trim().lowercase()) {
         "null", "" -> null
         "true" -> true
         "false" -> false
@@ -659,7 +719,7 @@ fun String.keyword(): Any? {
              ?: this.toDoubleOrNull()
              ?: this.toTemporal()
              ?: this.toUri()
-             ?: this
+             ?: defaultValue
     }
 }
 
@@ -814,6 +874,22 @@ fun Number.toBytes(): ByteArray {
     return bytes.toByteArray()
 }
 
+fun Map<out Any?,Any?>.primaryKey(forceFirst: Boolean): String {
+    val keys = this.keys
+    if (keys.isEmpty())
+        return ""
+    if (keys.contains("id"))
+        return "id"
+    if (keys.contains("code"))
+        return "code"
+    for (key in keys) {
+        val value = this[key]
+        if (value is String || value == String::class)
+            return key.toString()
+    }
+    return if (forceFirst) keys.iterator().next().toString() else ""
+}
+
 fun Map<out Any?,Any?>.label(): String {
     val map = this
     return when (map.size) {
@@ -823,7 +899,7 @@ fun Map<out Any?,Any?>.label(): String {
         else -> {
             val cx = getContext()
             var name = ""
-            val lists = listOf(LABEL_KEYS, cx.value("languages").toCollection(), VALUE_KEYS)
+            val lists = listOf(LABEL_KEYS, cx.getValue("languages").toCollection(), VALUE_KEYS)
             for (list in lists) {
                 for (key in list) {
                     val value = map[key]
@@ -836,10 +912,20 @@ fun Map<out Any?,Any?>.label(): String {
                     break
             }
             if (name.isBlank())
-                name = map.toText()
+                name = map.values.filterIsInstance<String>().joinToString(" ")
             name
         }
     }
+}
+
+fun KClass<*>.parents(): Set<KClass<*>> {
+    val classes = LinkedHashSet<KClass<*>>()
+    var parent: KClass<*>? = this
+    while (parent != null) {
+        classes.add(parent)
+        classes.addAll(parent!!.superclasses)
+    }
+    return classes
 }
 
 private val NORMALIZED_FORM = Normalizer.Form.NFD
@@ -851,37 +937,4 @@ private val VIEW_TYPES = "imane,audio,video,model".split(",")
 private val LABEL_KEYS = "name,label,symbol".split(",")
 private val VALUE_KEYS = "value,id,type".split(",")
 private var defaultCharset = "utf8"
-
-private fun executeUriMethod(method: UriMethod, args: List<Any?>): Any? {
-    val config = getContext().configuration()
-    if (args.isEmpty())
-        return null
-    val uri = args[0].toUri() ?: if (args[0].isText()) URI(args[0].toText()) else return method.defaultValue(args[0])
-    val value = when (args.size) {
-        0, 1 -> null
-        2 -> args[1]
-        else -> args.subList(1, args.size)
-    }
-    if (uri.scheme != null)
-        return resolveUri(resolveRelativeTemplate(uri), method, mapOf(), value)
-    var parts = if (uri.path == null) emptyList() else uri.path.split("/").filter { it.isNotBlank() }
-    if (parts.isEmpty())
-        return null
-    val query = Query(getFormat("application/x-www-form-urlencoded")!!.decodeText(uri.query ?: "").toMap()!!.mapKeys{it.toString()})
-    val prefix = parts[0]
-    val ns = config.routes[prefix] ?: return null
-    if (ns.readOnly && method != UriMethod.GET)
-        return if (method == UriMethod.DELETE) false else null
-    if (!ns.keepUrlEncoding)
-        parts = parts.map { it.urlDecode() }
-    if (method == UriMethod.GET && query.page.size > config.maxPageSize)
-        query.addQueryPart(".page", mapOf("size" to config.maxPageSize))
-    val response = ns.apply(method, parts.subList(1, parts.size), query, value)
-    if (response.status.code >= 400)
-        throw RuntimeException("${response.data ?: response.status.message}")
-    else if (response.data is InputStream)
-        return getFormat(response.type ?: "text/plain")!!.decode(response.data, defaultCharset())
-    else
-        return response.data
-
-}
+private var defaultContentType = "application/json"

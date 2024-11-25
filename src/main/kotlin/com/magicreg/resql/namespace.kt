@@ -5,18 +5,6 @@ import java.io.File
 import java.io.FileInputStream
 import java.net.URI
 
-fun getNamespace(prefix: String): Namespace? {
-    return NS_PREFIX_MAP[prefix] ?: NS_URI_MAP[prefix]
-}
-
-fun addNamespace(ns: Namespace): Boolean {
-    if (NS_PREFIX_MAP.containsKey(ns.prefix) || NS_URI_MAP.containsKey(ns.uri))
-        return false
-    NS_PREFIX_MAP[ns.prefix] = ns
-    NS_URI_MAP[ns.uri] = ns
-    return true
-}
-
 class MemoryNamespace(
     override val prefix: String,
     override val uri: String,
@@ -34,7 +22,7 @@ class MemoryNamespace(
         return mapping.containsKey(name)
     }
 
-    override fun value(name: String): Any? {
+    override fun getValue(name: String): Any? {
         return if (name.isBlank()) this else mapping[name]
     }
 
@@ -70,10 +58,10 @@ class HttpNamespace(
     override val names: List<String> = emptyList()
 
     override fun hasName(name: String): Boolean {
-        return value(name) != null
+        return getValue(name) != null
     }
 
-    override fun value(name: String): Any? {
+    override fun getValue(name: String): Any? {
         val sep = if (uri.endsWith("/") || name.startsWith("/")) "" else "/"
         return URI("$uri$sep$name").resolve()
     }
@@ -86,10 +74,11 @@ class HttpNamespace(
         return toBoolean(if (value == null) url.delete() else toBoolean(url.put(value)))
     }
 
-    override fun apply(method: UriMethod, path: List<String>, query: Query, value: Any?): Response {
+    override fun execute(method: RestMethod, path: List<String>, query: Query, value: Any?): Response {
         val sep = if (uri.endsWith("/")) "" else "/"
         val url = "$uri$sep${path.joinToString("/")}${queryString(query)}"
-        return httpRequest(method, URI(url), emptyMap(), value)
+        val headers = if (method == RestMethod.GET && value is String) mapOf("accept" to value) else emptyMap()
+        return httpRequest(method, URI(url), headers, value)
     }
 
     override fun toString(): String {
@@ -109,7 +98,7 @@ class FolderNamespace(
         return File("$folder/$name").exists()
     }
 
-    override fun value(name: String): Any? {
+    override fun getValue(name: String): Any? {
         val file = File("$folder/$name")
         return if (file.isDirectory)
             FolderNamespace(file)
@@ -129,26 +118,39 @@ class FolderNamespace(
         return toBoolean(if (value == null) url.delete() else toBoolean(url.put(value)))
     }
 
-    override fun apply(method: UriMethod, path: List<String>, query: Query, value: Any?): Response {
+    override fun execute(method: RestMethod, path: List<String>, query: Query, value: Any?): Response {
         val file = File("$folder/${path.joinToString("/")}")
-        return if (file.isDirectory) {
-            val offset = folder.toString().length+1
-            Response(file.list().map { "$file/$it".substring(offset) })
-        }
-        else if (file.exists()) {
+        return if (file.exists()) {
             when (method) { // TODO: take query into account
-                UriMethod.GET -> Response(FileInputStream(file), file.toURI().contentType())
-                UriMethod.POST, UriMethod.PUT -> {
-                    val result = resolveUri(file.toURI(), method, emptyMap(), value)
-                    if (result == null)
-                        Response(StatusCode.Forbidden)
+                RestMethod.GET -> {
+                    if (file.isDirectory) {
+                        val index = getIndexFile(file, value)
+                        if (index == null)
+                            Response(file.list().map { "$file/$it".substring(folder.toString().length + 1) })
+                        else
+                            Response(FileInputStream(index), index.toURI().contentType())
+                    }
                     else
-                        Response(result, file.toURI().contentType())
+                        Response(FileInputStream(file), file.toURI().contentType())
                 }
-                UriMethod.DELETE -> Response(file.delete())
+                RestMethod.POST, RestMethod.PUT -> {
+                    if (file.isDirectory)
+                        Response(StatusCode.MethodNotAllowed)
+                    // TODO: we could create a new file with POST (give a random name and select the extension from the content-type)
+                    else {
+                        val result = resolveUri(file.toURI(), method, emptyMap(), value)
+                        if (result == null)
+                            Response(StatusCode.Forbidden)
+                        else if (result is Response)
+                            return result
+                        else
+                            Response(result, file.toURI().contentType())
+                    }
+                }
+                RestMethod.DELETE -> Response(file.delete())
             }
         }
-        else if (method == UriMethod.PUT && file.parentFile.exists()) {
+        else if (method == RestMethod.PUT && file.parentFile.exists()) {
             val buffer = ByteArrayOutputStream()
             getFormat(file.toURI().contentType() ?: "text/plain")!!.encode(value, buffer, defaultCharset())
             file.writeBytes(buffer.toByteArray())
@@ -165,27 +167,28 @@ class FolderNamespace(
 }
 
 class ContextWrapperNamespace(override val prefix: String): Namespace {
-    override val uri: String get() { return getContext().uri }
-    override val readOnly: Boolean get() { return getContext().readOnly }
-    override val names: List<String>  get() { return getContext().names }
+    override val uri: String get() { return if (contextInitialized()) getContext().uri else "" }
+    override val readOnly: Boolean get() { return if (contextInitialized()) getContext().readOnly else false }
+    override val names: List<String>  get() { return if (contextInitialized()) getContext().names else emptyList() }
 
     override fun hasName(name: String): Boolean {
-        return getContext().hasName(name)
+        return if (contextInitialized()) getContext().hasName(name) else false
     }
 
-    override fun value(name: String): Any? {
-        return getContext().value(name)
+    override fun getValue(name: String): Any? {
+        return if (contextInitialized()) getContext().getValue(name) else null
     }
 
     override fun setValue(name: String, value: Any?): Boolean {
-        return getContext().setValue(name, value)
+        return if (contextInitialized()) getContext().setValue(name, value) else false
+    }
+
+    override fun execute(method: RestMethod, path: List<String>, query: Query, value: Any?): Response {
+        return if (contextInitialized()) getContext().execute(method, path, query, value) else Response(StatusCode.NotFound)
     }
 }
 
 // TODO: ArchiveNamespace class that can interface zip and tgz
-
-private val NS_PREFIX_MAP = mutableMapOf<String,Namespace>()
-private val NS_URI_MAP = mutableMapOf<String,Namespace>()
 
 private fun queryString(query: Query): String {
     val it = query.filter.iterator()
@@ -196,4 +199,14 @@ private fun queryString(query: Query): String {
         return "?"+getFormat("form")!!.encodeText(map)
     }
     return ""
+}
+
+private fun getIndexFile(folder: File, type: Any?): File? {
+    if (type != "text/html")
+        return null
+    for (file in folder.list()) {
+        if (file == "index.html" || file == "index.htm")
+            return File("$folder/$file")
+    }
+    return null
 }

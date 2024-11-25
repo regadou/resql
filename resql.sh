@@ -1,16 +1,19 @@
 #!/bin/bash
 
-COOKIE_FILE="/home/$USER/.resql-cookies"
+ACCEPT_LANG=$(echo $LANG|cut -d _ -f 1|cut -d . -f 1)
 if [ -z "$RESQL_SERVER" ]; then
     RESQL_SERVER="$1"
     shift
 fi
 
 execute() {
-    if ! [ -f "$COOKIE_FILE" ]; then
-        touch "$COOKIE_FILE"
+    if [ -z "$RESQL_COOKIES" ]; then
+        RESQL_COOKIES="/home/$USER/resql-cookies-$RANDOM.txt"
+        action="-c"
+    else
+        action="-b"
     fi 
-    curl -H "content-type: text/x-resql" -b "$COOKIE_FILE" -X POST "$RESQL_SERVER" -d "$1"
+    curl -H "content-type: text/x-resql" -H "accept: application/json" -H "accept-language: $ACCEPT_LANG" $action "$RESQL_COOKIES" -X POST "$RESQL_SERVER" -d "$1"
 }
 
 if [ -z "$RESQL_SERVER" ]; then
@@ -20,7 +23,7 @@ if [ -z "$RESQL_SERVER" ]; then
 elif [ -z "$1" ]; then
     while [ -z '' ]; do
         echo ''
-        read -p '? ' line
+        read -ep '? ' line
         if [ "$line" = "exit" ] || [ "$line" = "quit" ]; then
             break
         elif [ -n "$line" ]; then

@@ -2,7 +2,16 @@ package com.magicreg.resql
 
 import org.apache.commons.beanutils.BeanMap
 
-class Query(query: Map<String,Any?>) {
+class Query(src: Any? = null) {
+    private val query = (if (src.isText())
+        getFormat("application/x-www-form-urlencoded")!!.decodeText(src.toText()).toMap()!!
+    else if (src is Filter)
+        mapOf(".$filterKey" to src)
+    else if (src == null)
+        emptyMap()
+    else
+        src.toMap() ?: throw RuntimeException("Invalid query value: $src")
+    ).mapKeys{it.key.toString()}
     private val data = parseQueryData(query)
     val source: Collection<String> get() { return stringCollection(data[sourceKey]) }
     val keys: Collection<String> get() { return stringCollection(data[keysKey]) }
@@ -119,6 +128,12 @@ class Filter(key: String? = null, compare: Any? = null, value: Any? = null): Ite
         return this
     }
 
+    fun addConditions(iterator: Iterator<Any?>): Filter {
+        while (iterator.hasNext())
+            mapCondition(toMap(iterator.next()).mapKeys { it.key.toText() })
+        return this
+    }
+
     fun mapCondition(condition: Map<String,Any?>): Filter {
         if (condition.isNotEmpty()) {
             val map = mutableMapOf<String, Any?>()
@@ -192,6 +207,8 @@ private fun setFilterData(filter: Filter, data: Any?) {
     }
     else if (data is Map<*,*>)
         filter.mapCondition(data as Map<String,Any?>)
+    else if (data is Filter)
+        filter.addConditions(data.iterator())
 }
 
 private fun filterItems(items: Iterator<Any?>, filter: Filter): List<Any?> {

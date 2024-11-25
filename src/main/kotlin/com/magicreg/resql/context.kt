@@ -36,21 +36,22 @@ fun getContext(vararg values: Any): Context {
         if (value is Context)
             parent = value
         else if (value is Namespace) {
+            val map = value.toMap()!!.mapKeys { it.key.toString() }.toMutableMap()
             if (value.readOnly)
-                constants = value.toMap()
+                constants = map
             else if (variables == null)
-                variables = value.toMap()
+                variables = map
             else if (constants == null)
-                constants = value.toMap()
+                constants = map
             else if (variables is MultiMap)
-                variables.add(value.toMap())
+                variables.add(map)
             else
-                variables = value.toMap()
+                variables = map
         }
         else if (value is MutableMap<*,*>)
             variables = value as MutableMap<String,Any?>
         else if (value is Map<*,*>)
-            constants = value as Map<String,Any?>
+            constants = value.mapKeys { it.key.toString() }
         else if (value is String)
             name = value
         else if (value is URI)
@@ -59,8 +60,6 @@ fun getContext(vararg values: Any): Context {
             config = value
     }
 
-    if (constants == null && variables == null)
-        constants = getNamespace("resql")?.toMap()
     if (name == null)
         name = randomName()
     if (uri == null)
@@ -80,6 +79,7 @@ class Context(
 ): Namespace {
     override val prefix: String = ""
     override val readOnly: Boolean = false
+    private val namespaces = mutableMapOf<String,Namespace>()
     var requestUri: String? = null
     init { CONTEXT_MAP[name] = this }
 
@@ -87,7 +87,7 @@ class Context(
         if (CURRENT_CONTEXT.get() != this)
             throw RuntimeException("This context is not the current thread context")
         val cx = Context(childName ?: name+"/"+randomName(), uri, this, constants, mutableMapOf(), null)
-        CURRENT_CONTEXT.set(parent)
+        CURRENT_CONTEXT.set(cx)
         return cx
     }
 
@@ -103,6 +103,10 @@ class Context(
             CURRENT_CONTEXT.set(null)
     }
 
+    fun hasConstant(key: String): Boolean {
+        return constants.containsKey(key) || parent?.hasName(key) ?: false
+    }
+
     override fun hasName(key: String): Boolean {
         return constants.containsKey(key) || variables.containsKey(key) || parent?.hasName(key) ?: false
     }
@@ -116,14 +120,14 @@ class Context(
         return keys.sorted()
     }
 
-    override fun value(name: String): Any? {
+    override fun getValue(name: String): Any? {
         if (this.name.isBlank())
             return this
         if (constants.containsKey(name))
             return constants[name]
         if (variables.containsKey(name))
             return variables[name]
-        return parent?.value(name)
+        return parent?.getValue(name)
     }
 
     override fun setValue(key: String, value: Any?): Boolean {
@@ -160,6 +164,24 @@ class Context(
             return parent.configuration()
         config = Configuration()
         return config!!
+    }
+
+    fun namespace(id: String): Namespace? {
+        var ns: Namespace? = null
+        var cx: Context? = this
+        while (ns == null && cx != null) {
+            ns = cx.namespaces[id]
+            cx = cx.parent
+        }
+        return ns
+    }
+
+    fun addNamespace(ns: Namespace): Boolean {
+        if (namespace(ns.prefix) != null || namespace(ns.uri) != null)
+            return false
+        namespaces[ns.prefix] = ns
+        namespaces[ns.uri] = ns
+        return true
     }
 
     override fun toString(): String {
