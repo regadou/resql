@@ -242,6 +242,9 @@ class Database(private val originalUrl: String, originalPrefix: String? = null):
     private fun createResponse(table: String, rows: List<Map<String,Any?>>, format: String?): Response {
         return if (format == "text/html") {
             val links = mutableListOf<String>()
+            val style = getContext().configuration().style
+            if (!style.isNullOrBlank())
+                links.add("<link href='$style' rel='stylesheet'>")
             val pkeys = primaryKeys(table)
             for (row in rows) {
                 val ids = mutableListOf<String>()

@@ -6,14 +6,18 @@ import java.net.URI
 
 fun main(args: Array<String>) {
     if (args.isEmpty())
-        return showHelp()
-    val map = mutableMapOf<String,Any?>()
-    for (arg in args)
-        setConfigData(map, arg)
-    startApp(map)
+        showHelp()
+    else {
+        val map = mutableMapOf<String, Any?>()
+        for (arg in args) {
+            if (!setConfigData(map, arg))
+                return
+        }
+        startApp(map)
+    }
 }
 
-private fun showHelp(message: String? = null) {
+private fun showHelp(message: String? = null, returnValue: Boolean = false): Boolean {
     val params = BeanMap(Configuration()).entries.filter{it.key!="class"}.map{ "  - ${it.key}: ${getFormat("json")!!.encodeText(it.value).trim()}" }.sorted()
     if (message != null)
         println(message)
@@ -22,15 +26,17 @@ private fun showHelp(message: String? = null) {
     println("  supported formats are json, yaml, csv or urlencoded form")
     println("  list of configuration parameters with their default values:")
     println(params.joinToString("\n"))
+    return returnValue
 }
 
-private fun setConfigData(configData: MutableMap<String, Any?>, txt: String) {
-    val uri = txt.toUri() ?: txt.detectFormat(true)?.toUri() ?: return showHelp("Invalid configuration uri: $txt")
+private fun setConfigData(configData: MutableMap<String, Any?>, txt: String): Boolean {
+    val uri = txt.toUri() ?: existingFile(txt) ?: txt.detectFormat(true)?.toUri() ?: return showHelp("Invalid configuration uri: $txt")
     val value = uri.get().resolve()
     if (value is Exception)
         throw value
     for (entry in toMap(value).entries)
         configData[entry.key.toString()] = entry.value
+    return true
 }
 
 private fun startApp(configData: Map<String, Any?>) {
@@ -96,4 +102,9 @@ private fun loadNamespace(prefix: String, uri: URI): Namespace {
         // TODO: support sftp uri scheme as if it was a mounted remote file
         else -> throw RuntimeException("Uri scheme not supported for namespaces: ${uri.scheme}")
     }
+}
+
+fun existingFile(txt: String): URI? {
+    val file = File(txt)
+    return if (!file.exists() || file.isDirectory) null else file.toURI()
 }
