@@ -361,9 +361,11 @@ private fun decodeHtml(input: InputStream, charset: String): Any? {
 
 private fun encodeHtml(value: Any?, output: OutputStream, charset: String) {
     val style = getContext().configuration().style
-    val head = if (style.isNullOrBlank()) "" else "<link href='$style' rel='stylesheet'>\n"
-    // TODO: we should add a charset tag in the headers
-    output.write(encodeHtmlPart(value, head).toByteArray(Charset.forName(charset)))
+    val head = arrayOf(
+        if (style.isNullOrBlank()) "" else "<link href='$style' rel='stylesheet'>",
+        if (charset.isNullOrBlank()) "" else "<meta charset='$charset'>"
+    )
+    output.write(encodeHtmlPart(value, head.joinToString("\n")).toByteArray(Charset.forName(charset)))
 }
 
 private fun encodeHtmlPart(value: Any?, head: String = ""): String {

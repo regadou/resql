@@ -23,18 +23,17 @@ import kotlin.reflect.KClass
 import kotlin.reflect.full.superclasses
 import kotlin.text.toCharArray
 
-enum class Type(vararg val classes: KClass<*>): Function {
-    ANY(Any::class),
-    NUMBER(Number::class, Boolean::class),
-    FUNCTION(Function::class),
-    ENTITY(Map::class),
-    COLLECTION(List::class, Array::class, Iterable::class, Iterator::class, Enumeration::class),
-    TEXT(String::class),
-    DOCUMENT(Document::class);
+enum class Type(override val symbol: String, vararg val classes: KClass<*>,): Function {
+    ANY("A", Any::class),
+    NUMBER("n", Number::class, Boolean::class),
+    FUNCTION("f", Function::class),
+    ENTITY("e", Map::class),
+    GROUP("g", List::class, Array::class, Iterable::class, Iterator::class, Enumeration::class),
+    TEXT("t", String::class, Expression::class, URI::class),
+    DOCUMENT("d", Document::class);
     // TODO: where does type, namespace, format, property, mapentry, expression fit into all this ?
 
     override val id = this.name.lowercase()
-    override val symbol: String = ""
     override val lambda = { args: List<Any?> ->
         if (this == TEXT)
             args.joinToString("") { it.resolve(true).toText(false) }
@@ -51,12 +50,16 @@ enum class Type(vararg val classes: KClass<*>): Function {
     fun isInstance(value: Any?): Boolean {
         if (this == ANY)
             return true
-        if (this == TEXT)
-            return value.isText()
         for (c in classes) {
             if (c.isInstance(value))
                 return true
         }
+        if (this == TEXT)
+            return value.isText()
+        if (this == ENTITY)
+            return value.isMappable()
+        if (this == GROUP)
+            return value.isIterable()
         return false
     }
 }
@@ -85,7 +88,8 @@ enum class CompareOperator(override val symbol: String, override val lambda: (Li
 
 enum class LogicOperator(override val symbol: String, override val lambda: (List<Any?>) -> Any?): Function {
     OR("|", ::or_func),
-    AND("&", ::and_func);
+    AND("&", ::and_func),
+    NOT("!", ::and_func);
 
     override val id = this.name.lowercase()
     override fun toString(): String { return "$id()" }
@@ -113,7 +117,7 @@ enum class MiscOperator(override val symbol: String, override val lambda: (List<
     WITH("?", ::with_func),
     SORT(">>", ::sort_func),
     EACH("?*", ::each_func),
-    SCHEMA("", ::schema_func),
+    SCHEMA("?@", ::schema_func),
     PRINT("", ::print_func);
 
     override val id = this.name.lowercase()

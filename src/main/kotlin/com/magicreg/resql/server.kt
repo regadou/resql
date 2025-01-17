@@ -114,15 +114,16 @@ private suspend fun homeRedirect(call: ApplicationCall, headers: Map<String,Any?
 
 private suspend fun sendValue(prefix: String, suffix: String, response: Response, headers: Map<String,Any?>, call: ApplicationCall) {
     val format = getFormat(response.type ?: "") ?: responseFormat(headers)
+    val charset = response.charset
     var typeParts = format.mimetype.split("/")
     val data = if (typeParts[1] == "html" && response.data is Collection<*>) {
-        val style = getContext().configuration().style
+        val style = getContext().configuration().style ?: ""
         val css = if (style.isNullOrBlank()) "" else "<link href='$style' rel='stylesheet'>\n"
         val links = response.data.sortedBy { it.toString().lowercase() }.joinToString("<br>\n") { printHtmlLink(it, prefix, suffix, headers) }
-        "<base href='$prefix'>\n$css$links"
+        listOf("<base href='$prefix'>", "<meta charset='$charset'>", css, links).joinToString("\n")
     }
     else
-        format.encodeText(response.data, response.charset)
+        format.encodeText(response.data, charset)
     call.respondText(data, ContentType(typeParts[0], typeParts[1]), httpStatus(response.status))
 }
 

@@ -41,6 +41,7 @@ dependencies {
     implementation("org.jetbrains.kotlin:kotlin-scripting-jsr223")
     implementation("org.jetbrains.kotlin:kotlin-compiler-embeddable")
     implementation("commons-beanutils:commons-beanutils:1.9.4")
+    implementation("io.swagger.parser.v3:swagger-parser:2.1.24")
     implementation("com.fasterxml.jackson.core:jackson-annotations:2.12.3")
     implementation("com.fasterxml.jackson.core:jackson-core:2.12.3")
     implementation("com.fasterxml.jackson.core:jackson-databind:2.12.3")

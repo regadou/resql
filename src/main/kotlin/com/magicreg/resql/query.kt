@@ -116,6 +116,7 @@ class Filter(key: String? = null, compare: Any? = null, value: Any? = null): Ite
             when (logic) {
                 LogicOperator.OR -> conditions.add(mutableMapOf())
                 LogicOperator.AND -> {}
+                LogicOperator.NOT -> {}
             }
         }
         conditions[conditions.size - 1][key] = mapOf(compare.symbol to value)
